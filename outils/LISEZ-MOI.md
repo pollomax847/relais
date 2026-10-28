@@ -8,6 +8,7 @@
 | `sante/` | pas, poids et sommeil, une valeur par jour (CSV) ; `montre.csv` : la journée vue par la montre (pas, FC de repos, min, moyenne et max, stress, minutes d'intensité) |
 | `montre-garmin/` | sauvegardes de la montre branchée en USB |
 | `vers-montre/` | parcours et entraînements en attente du prochain branchement (`relais.py vers-montre`) |
+| `garmin-connect/` | copie des pas du jour, des nuits et des pesées de Garmin Connect, un fichier par année, mise à jour par `relais.py sante` (lecture seule) |
 | `analyse/` | `ANALYSE.md` : ce que contient chaque source et les règles de conversion |
 | `endurain/` | Endurain et l'interface `relais` (`docker compose`) |
 | `outils/` | le code ; `historique-v1/` garde la trace de ce que l'ancienne version a envoyé à Garmin |
@@ -83,7 +84,9 @@ Garmin n'accepte que les pesées. Le sommeil n'existe pas en FIT importable : il
 ## Montre Garmin (Instinct E-Sports)
 Branchée en USB, elle apparaît sur `/media/<utilisateur>/GARMIN`. Le service `relais-montre` (systemd utilisateur) sauvegarde ses fichiers dans `montre-garmin/` à chaque branchement, envoie ses activités à Endurain, puis lance `relais.py sante` (pas et fréquence cardiaque de la montre compris).
 
-`relais.py sante` lit aussi ses fichiers `Monitor/` : les pas du jour rejoignent `sante/pas.csv` (et Endurain), et le reste va dans `sante/montre.csv`. Le 25/10/2026, la montre ne gardait que le fichier du jour : chaque branchement ne sauvegarde que les journées encore présentes. Son sommeil n'est pas lu, car l'Instinct laisse les serveurs Garmin calculer les phases ; il vient de Health Sync.
+`relais.py sante` lit aussi ses fichiers `Monitor/` : les pas du jour rejoignent `sante/pas.csv` (et Endurain), et le reste va dans `sante/montre.csv`. Le 25/10/2026, la montre ne gardait que le fichier du jour : chaque branchement ne sauvegarde que les journées encore présentes. Son sommeil n'est pas lu, car l'Instinct laisse les serveurs Garmin calculer les phases ; il vient de Garmin Connect (ci-dessous) et de Health Sync.
+
+Comme la montre ne garde que quelques jours, `relais.py sante` copie aussi les pas du jour, les nuits (début, fin et phases) et les pesées de Garmin Connect dans `garmin-connect/`, en lecture seule. La première fois, cela fait environ 140 demandes, espacées d'une seconde. Ensuite, trois ou quatre demandes suffisent, car une année terminée n'est plus redemandée. Les pesées que l'outil a lui-même envoyées à Garmin sont laissées de côté. Le 28/10/2026, cela a ajouté 2 179 jours de pas (novembre 2020 → 2026) et 56 pesées.
 
 Parcours et entraînements vers la montre, sans l'appli du téléphone :
 ```bash

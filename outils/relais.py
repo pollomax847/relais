@@ -79,6 +79,9 @@ VERS_MONTRE = chemin(CHEMINS.get("vers_montre", "vers-montre"))  # parcours et e
 SANTE = chemin(CHEMINS.get("sante", "sante"))  # pas, poids et sommeil retenus, en CSV lisibles
 ETAT_SANTE = PROJET / "outils" / ".sante-endurain.json"  # ce qui a déjà été envoyé à Endurain
 POIDS_GARMIN = PROJET / "outils" / ".poids-garmin.txt"  # pesées créées sur Garmin par l'outil (jour, kg)
+GARMIN_CONNECT = chemin(CHEMINS.get("garmin_connect", "garmin-connect"))  # copie des pas et pesées de Garmin Connect
+GARMIN_DEPUIS = 2008  # première année demandée à Garmin Connect (ouverture du service)
+PAUSE_GARMIN = 1  # secondes entre deux demandes à Garmin Connect, au rythme d'un client ordinaire
 AUTO_GARMIN = 300  # activités envoyées par destination et par passage automatique (SPORT_AUTO_NOMBRE dans sport.env)
 
 # Toutes les sources lues par « inventaire » et « historique » : « donnees » et « sources » de chemins.yml.
@@ -91,7 +94,8 @@ SOURCES = {"projet": chemin(CHEMINS.get("donnees", ".")),
 # Dans le projet : outils, documentation et la copie de travail d'Endurain ne sont pas des données
 EXCLUS_PROJET = {"endurain", "outils", "scripts", "documentation", "sante", "a-supprimer", "activites-v2", "analyse",
                  "a-importer",  # lots préparés pour un import manuel (relais.py lots) : des copies de activites-v2
-                 SANTE.name, CORBEILLE.name, V2.name, VERS_MONTRE.name}
+                 SANTE.name, CORBEILLE.name, V2.name, VERS_MONTRE.name,
+                 GARMIN_CONNECT.name}  # lu seulement par « sante », pas comme activités
 
 # Dossiers de la montre qui contiennent vos données. Les autres (Debug, EDM, REMOTESW, TEXT…) sont internes à la montre.
 DOSSIERS_MONTRE = ["Activity", "Monitor", "Sleep", "Summary", "Records", "Totals",
@@ -863,6 +867,99 @@ def poids_garmin(api, poids):
     print(f"Garmin : {ajoutees} pesée(s) ajoutée(s), {len(envoyees)} au total venant de l'outil")
 
 
+def copier_garmin(api):
+    """Copie en lecture seule les pas du jour, les nuits et les pesées de Garmin Connect dans GARMIN_CONNECT, un fichier
+    par type et par année (garmin-connect-pas-AAAA.json…), lus ensuite par sante.py comme les autres sources.
+
+    Une année copiée jusqu'au 31/12 n'est plus redemandée : après la première fois (une centaine de demandes par type), un
+    passage n'en fait que trois ou quatre (les 7 derniers jours de pas et de sommeil, les pesées de l'année). Pas et
+    sommeil commencent avec la montre : on remonte le temps jusqu'à deux années vides de suite. Les pesées que l'outil a lui-même créées sur
+    Garmin (POIDS_GARMIN) sont laissées de côté : ce sont des copies des autres sources.
+    """
+    envoyees = {}
+    if POIDS_GARMIN.exists():
+        for ligne in POIDS_GARMIN.read_text().splitlines():
+            jour, _, kg = ligne.partition("\t")
+            if kg:
+                envoyees[jour] = float(kg)
+    GARMIN_CONNECT.mkdir(parents=True, exist_ok=True)
+    aujourdhui = date.today()
+    demandes = 0
+
+    def demander(fonction, *args):
+        nonlocal demandes
+        demandes += 1
+        reponse = fonction(*args)
+        time.sleep(PAUSE_GARMIN)
+        return reponse
+
+    def par_jour(appel, garder):
+        """Lecture d'une valeur par jour, 28 jours au plus par demande ; garder(l) renvoie ce qu'on copie, ou None."""
+        def lire(annee, ancien, fin):
+            debut = date(annee, 1, 1)
+            if ancien["jusqu_au"]:
+                debut = max(debut, date.fromisoformat(ancien["jusqu_au"]) - timedelta(days=7))  # le dernier jour était partiel
+            jours = {l["calendarDate"]: l for l in ancien["valeurs"]}
+            while debut <= fin:
+                bout = min(debut + timedelta(days=27), fin)
+                for l in demander(appel, debut.isoformat(), bout.isoformat()) or []:
+                    if copie := garder(l):
+                        jours[l["calendarDate"]] = copie
+                debut = bout + timedelta(days=1)
+            return sorted(jours.values(), key=lambda l: l["calendarDate"])
+        return lire
+
+    pas = par_jour(api.get_daily_steps, lambda l: l.get("totalSteps") and
+                   {"calendarDate": l["calendarDate"], "totalSteps": l["totalSteps"]})
+    # une nuit par jour de réveil : heures en ms (UTC et locales), phases en secondes ; les champs vides sont omis
+    sommeil = par_jour(api.get_sleep_daily, lambda l: (l.get("values") or {}).get("totalSleepTimeInSeconds") and
+                       {"calendarDate": l["calendarDate"], **{k: v for k, v in l["values"].items() if v is not None}})
+
+    def poids(annee, ancien, fin):
+        valeurs = []
+        reponse = demander(api.get_weigh_ins, f"{annee}-01-01", fin.isoformat()) or {}
+        for jour in reponse.get("dailyWeightSummaries", []):
+            mesures = [m for m in jour.get("allWeightMetrics", [])
+                       if not (m.get("sourceType") == "MANUAL" and m.get("calendarDate") in envoyees
+                               and abs((m.get("weight") or 0) / 1000 - envoyees[m["calendarDate"]]) <= 0.05)]
+            if mesures:
+                valeurs.append({"summaryDate": jour.get("summaryDate"), "allWeightMetrics": mesures})
+        return valeurs
+
+    def copier(nom, annee, lire):
+        fichier = GARMIN_CONNECT / f"garmin-connect-{nom}-{annee}.json"
+        fin = min(date(annee, 12, 31), aujourdhui)
+        ancien = json.loads(fichier.read_text()) if fichier.exists() else {"jusqu_au": None, "valeurs": []}
+        if annee < aujourdhui.year and ancien["jusqu_au"] == fin.isoformat():
+            return ancien["valeurs"]
+        valeurs = lire(annee, ancien, fin)
+        fichier.write_text(json.dumps({"jusqu_au": fin.isoformat(), "valeurs": valeurs}))
+        return valeurs
+
+    def remonter(nom, lire):
+        """Du plus récent au plus ancien, jusqu'à deux années vides de suite."""
+        total = vides = 0
+        for annee in range(aujourdhui.year, GARMIN_DEPUIS - 1, -1):
+            n = len(copier(nom, annee, lire))
+            total += n
+            vides = 0 if n else vides + 1
+            if vides == 2:
+                break
+        return total
+
+    pesees = 0
+    try:
+        jours_pas = remonter("pas", pas)
+        nuits = remonter("sommeil", sommeil)
+        for annee in range(GARMIN_DEPUIS, aujourdhui.year + 1):
+            pesees += sum(len(j["allWeightMetrics"]) for j in copier("poids", annee, poids))
+    except Exception as e:  # trop de demandes, coupure… : les années déjà copiées sont gardées, la suite au prochain passage
+        print(f"Garmin Connect : copie interrompue après {demandes} demande(s) ({e}), reprise au prochain passage")
+        return
+    print(f"Garmin Connect : {jours_pas} jours de pas, {nuits} nuits et {pesees} pesée(s) en copie dans {GARMIN_CONNECT} "
+          f"({demandes} demande(s), lecture seule)")
+
+
 def faire_sante(api_garmin=None):
     import sante
 
@@ -870,6 +967,9 @@ def faire_sante(api_garmin=None):
     racines = list(sources().values())
     if not any(ARCHIVE.resolve().is_relative_to(r.resolve()) for r in racines):
         racines.append(ARCHIVE)  # sauvegarde de la montre rangée hors des sources (chemins.yml)
+    if api_garmin is not None:
+        copier_garmin(api_garmin)
+    racines.append(GARMIN_CONNECT)  # exclu des autres racines : lu ici seulement
     pas, poids, sommeil, montre, lus = sante.collecter(racines, EXCLUS_PROJET | {"convertis", SANTE.name})
     print(f"  {lus['pas']} valeurs de pas, {lus['poids']} pesées, {lus['sommeil']} nuits lues ; {lus['écartés']} vides ou aberrantes écartées")
     print(f"  retenu après dédoublonnage : {len(pas)} jours de pas, {len(poids)} jours de poids, {len(sommeil)} nuits, "

@@ -2,7 +2,8 @@
 
 Sources reconnues, quel que soit le dossier, y compris dans les ZIP : Samsung Health (CSV), Withings, Mi Fit / Zepp (CSV),
 Runtastic / adidas Running (JSON), Google Fit (« Résumés quotidiens.csv »), Moves (CSV), Health Sync (poids et sommeil)
-et la montre Garmin (Monitor/*.FIT : pas, fréquence cardiaque, stress, minutes d'intensité).
+la montre Garmin (Monitor/*.FIT : pas, fréquence cardiaque, stress, minutes d'intensité) et la copie des pas, nuits et
+pesées de Garmin Connect faite par relais.py (garmin-connect-*.json).
 Les pas de Health Sync ne sont pas lus : l'export mélange sans les nommer les comptes de plusieurs applis (25/10/2026 :
 41 500 pas en tout, la montre en avait compté 9 779 à 10 h 42) et rien ne permet de les séparer.
 Le sommeil de la montre n'est pas lu : sur l'Instinct, les phases sont calculées par les serveurs Garmin à partir de
@@ -333,6 +334,30 @@ def _lire(fichier):
                 par_jour[jour] = par_jour.get(jour, 0) + int(pas)
         for jour, pas in par_jour.items():
             yield "pas", jour, pas, "Moves"
+
+    elif nom.startswith("garmin-connect-pas-") and nom.endswith(".json"):
+        for l in json.loads(fichier.read_text())["valeurs"]:  # copie des pas du jour de Garmin Connect (relais.py)
+            if l.get("totalSteps"):
+                yield "pas", date.fromisoformat(l["calendarDate"]), int(l["totalSteps"]), "Garmin Connect"
+
+    elif nom.startswith("garmin-connect-sommeil-") and nom.endswith(".json"):
+        for l in json.loads(fichier.read_text())["valeurs"]:  # nuits de Garmin Connect : datées du réveil, heures en ms
+            if l.get("gmtSleepStartTimeInMillis") and l.get("gmtSleepEndTimeInMillis"):
+                yield "sommeil", Sommeil(date.fromisoformat(l["calendarDate"]), _ms(l["gmtSleepStartTimeInMillis"]),
+                                         _ms(l["gmtSleepEndTimeInMillis"]), int(l["totalSleepTimeInSeconds"]), "Garmin Connect",
+                                         profond=l.get("deepTime") or None, leger=l.get("lightTime") or None,
+                                         rem=l.get("remTime") or None, eveil=l.get("awakeTime") or None,
+                                         decalage=timedelta(milliseconds=l.get("localSleepEndTimeInMillis", 0)
+                                                            - l["gmtSleepEndTimeInMillis"]))
+
+    elif nom.startswith("garmin-connect-poids-") and nom.endswith(".json"):
+        for jour in json.loads(fichier.read_text())["valeurs"]:  # pesées de Garmin Connect : grammes, heures en ms UTC
+            for m in jour.get("allWeightMetrics", []):
+                if m.get("weight") and m.get("timestampGMT"):
+                    yield "poids", Poids(date.fromisoformat(m["calendarDate"]), _ms(m["timestampGMT"]), m["weight"] / 1000,
+                                         "Garmin Connect", graisse=m.get("bodyFat"), eau=m.get("bodyWater"), imc=m.get("bmi"),
+                                         muscle=m["muscleMass"] / 1000 if m.get("muscleMass") else None,
+                                         os=m["boneMass"] / 1000 if m.get("boneMass") else None)
 
 
 PHASES_HEALTH_SYNC = {"deep": "profond", "light": "leger", "rem": "rem", "awake": "eveil"}

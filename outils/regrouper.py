@@ -28,10 +28,13 @@ DECALAGES_DOUTEUX = (3600, 7200, -3600, -7200)  # heure locale écrite comme UTC
 DECALAGES_VOYAGE = tuple(h * 3600 for h in range(-12, 13) if h not in (0, 1, 2, -1, -2))
 
 
+DOSSIER_PROJET = str(Path(__file__).resolve().parent.parent) + "/"  # quel que soit le nom du dossier
+
+
 def _relatif(chemin):
     """Chemin d'origine sans son emplacement (dossier du projet, archive sources-brutes.zip ou dossier zips/) :
     identique que les exports soient décompressés ou archivés, pour que les choix ne dépendent pas du rangement."""
-    for marque in ("sources-brutes.zip/", "sources-brutes/zips/", "Extracteur_Sport/"):
+    for marque in ("sources-brutes.zip/", "sources-brutes/zips/", DOSSIER_PROJET):
         if marque in chemin:
             chemin = chemin.split(marque, 1)[1]
             break
