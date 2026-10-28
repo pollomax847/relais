@@ -42,7 +42,7 @@ services:
     environment:
       - ENDURAIN_URL=http://endurain-app:8080  # adresse d'Endurain vue depuis ce conteneur
       - ENDURAIN_PUBLIC_URL=http://localhost:8080  # lien affiché dans l'interface
-      - SPORT_AUTO_HEURE=non  # suspendu le 25/10 en attendant les choix Strava/pesées ; remettre 04:00 pour le réactiver
+      - SPORT_AUTO_HEURE=04:00  # « non » pour suspendre ; sans SPORT_AUTO_DESTINATIONS (sport.env), aucune activité envoyée
       - TZ=Europe/Paris
     # Les dossiers sont montés au même chemin que sur l'ordinateur : les chemins des index et journaux restent valables
     volumes:
