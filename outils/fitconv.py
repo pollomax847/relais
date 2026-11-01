@@ -329,3 +329,123 @@ def type_fit(contenu):
 
     messages, _ = Decoder(Stream.from_byte_array(bytearray(contenu))).read()
     return (messages.get("file_id_mesgs") or [{}])[0].get("type")
+
+
+POINTS_DETAIL = 500  # points d'une activité envoyés à l'interface, au plus
+VITESSE_MAX = 150  # km/h ; au-delà, c'est un saut de GPS
+CADENCE_MAX = 120  # foulées ou tours par minute ; au-delà, une erreur du capteur
+MOUVEMENT_MIN = .5  # m/s : en deçà, on est à l'arrêt
+
+
+def denivele(altitudes):
+    """(montée, descente) en m. Un changement ne compte qu'à partir de 3 m : l'altitude d'une montre oscille sans cesse
+    (sur 4 sorties d'octobre 2026, 10, 12, 31 et 240 m contre 8, 9, 28 et 250 sur Runalyze)."""
+    montee = descente = 0.0
+    repere = None
+    for altitude in altitudes:
+        if repere is None:
+            repere = altitude
+        elif abs(altitude - repere) >= 3:
+            montee += max(altitude - repere, 0)
+            descente += max(repere - altitude, 0)
+            repere = altitude
+    return round(montee), round(descente)
+
+
+def temps_en_mouvement(mesures, metres):
+    """Secondes passées à avancer, d'après des (secondes, distance) : 52:07 pour les 52:11 de Smashrun le 01/11/2026. None si
+    les points ne couvrent pas la distance de la séance (« metres ») : rapporter l'une au temps de l'autre donnerait une
+    allure fausse (27/06/2021 : 5,95 km dans les points pour 7,7 km annoncés, soit 4:45 au km)."""
+    connues = [d for _, d in mesures if d is not None]
+    if not connues or not metres or abs(connues[-1] - connues[0] - metres) > .05 * metres:
+        return None
+    total = 0.0
+    for (t1, d1), (t2, d2) in zip(mesures, mesures[1:]):
+        if d1 is not None and d2 is not None and t2 > t1 and (d2 - d1) / (t2 - t1) >= MOUVEMENT_MIN:
+            total += t2 - t1
+    # moins d'un tiers de la séance en mouvement : ce sont les points qui manquent, pas la vitesse (29/11/2020 : 1:34 au km)
+    return total if total >= (mesures[-1][0] - mesures[0][0]) / 3 else None
+
+
+def temps_de_passage(mesures, pas):
+    """Une entrée par tranche de « pas » mètres, d'après des (secondes, distance, FC, altitude) ; la dernière, plus courte, si elle compte."""
+    tranches, debut, depart_t, depart_d = [], 0, None, 0.0
+    points = [m for m in mesures if m[1] is not None]
+
+    def fermer(fin, t, d):
+        morceau = points[debut:fin + 1]
+        fc = [m[2] for m in morceau if m[2]]
+        tranches.append({"metres": round(d - depart_d), "secondes": round(t - depart_t, 1), "fc": round(sum(fc) / len(fc)) if fc else None,
+                         "montee": denivele([m[3] for m in morceau if m[3] is not None])[0]})
+
+    for i, (t, d, *_) in enumerate(points):
+        if depart_t is None:
+            depart_t = t
+        while d - depart_d >= pas and i:
+            t0, d0 = points[i - 1][:2]
+            limite = depart_d + pas
+            instant = t0 + (t - t0) * (limite - d0) / (d - d0) if d > d0 else t
+            fermer(i, instant, limite)
+            debut, depart_t, depart_d = i, instant, limite
+    if points and points[-1][1] - depart_d >= pas / 10:
+        fermer(len(points) - 1, points[-1][0], points[-1][1])
+    return tranches
+
+
+def lire_detail(chemin):
+    """Une activité de la bibliothèque pour l'interface : les totaux de la séance et ses points
+    [secondes depuis le départ, lat, lon, FC, altitude, km/h, cadence, puissance] et ses tours. La vitesse vient de la distance sur au moins 30 s : d'un
+    point au suivant, elle ne serait que du bruit. Pour la même raison, le dénivelé ne compte une montée qu'à partir de 3 m."""
+    from garmin_fit_sdk import Decoder, Stream
+
+    messages, _ = Decoder(Stream.from_file(str(chemin))).read()
+    seance = (messages.get("session_mesgs") or [{}])[0]
+    tous = [r for r in messages.get("record_mesgs", []) if r.get("timestamp")]
+    tours = messages.get("lap_mesgs", [])
+    depart = seance.get("start_time") or (tous[0]["timestamp"] if tous else None)
+    if depart is None:
+        return {}
+    secondes = lambda r: (r["timestamp"] - depart).total_seconds()
+    degres = lambda v: None if v is None else round(v * 180 / 2 ** 31, 6)
+    points = tous[::len(tous) // POINTS_DETAIL + 1]
+
+    def vitesse(i):
+        avant = next((p for p in reversed(points[:i]) if secondes(points[i]) - secondes(p) >= 30), None)
+        if avant is None or points[i].get("distance") is None or avant.get("distance") is None:
+            return None
+        kmh = round(3.6 * (points[i]["distance"] - avant["distance"]) / (secondes(points[i]) - secondes(avant)), 1)
+        return kmh if 0 <= kmh <= VITESSE_MAX else None
+
+    def cadence(r):
+        return r["cadence"] if 0 < (r.get("cadence") or 0) <= CADENCE_MAX else None
+
+    altitudes = [r["altitude"] for r in tous if r.get("altitude") is not None]
+    montee, descente = denivele(altitudes)
+    instants = [secondes(r) for r in tous]
+    mesures = [(t, r.get("distance")) for t, r in zip(instants, tous)]
+    en_mouvement = temps_en_mouvement(mesures, seance.get("total_distance"))
+    vitesse_max, debut = None, 0
+    connues = [m for m in mesures if m[1] is not None]
+    for t, d in connues:  # la meilleure vitesse tenue 30 s : d'un point à l'autre, le GPS oscille
+        while debut + 1 < len(connues) and t - connues[debut + 1][0] >= 30:
+            debut += 1
+        if t - connues[debut][0] >= 30:
+            kmh = 3.6 * (d - connues[debut][1]) / (t - connues[debut][0])
+            if kmh <= VITESSE_MAX and (vitesse_max is None or kmh > vitesse_max):
+                vitesse_max = kmh
+    fc = [r["heart_rate"] for r in tous if r.get("heart_rate")]
+    cadences = [cadence(r) for r in tous if cadence(r)]
+    return {"depart": depart.isoformat(), "duree_s": seance.get("total_elapsed_time") or (secondes(tous[-1]) if tous else 0),
+            "distance_m": seance.get("total_distance"), "fc_moy": seance.get("avg_heart_rate"),
+            "fc_max": seance.get("max_heart_rate"), "calories": seance.get("total_calories"),
+            "fc_min": min(fc, default=None), "denivele_m": montee if altitudes else None, "descente_m": descente if altitudes else None,
+            "altitude_min": round(min(altitudes)) if altitudes else None, "altitude_max": round(max(altitudes)) if altitudes else None,
+            "mouvement_s": en_mouvement and round(en_mouvement), "vitesse_max": round(vitesse_max, 1) if vitesse_max else None,
+            "cadence_moy": round(sum(cadences) / len(cadences)) if cadences else None, "cadence_max": max(cadences, default=None),
+            "passages": temps_de_passage([(t, r.get("distance"), r.get("heart_rate"), r.get("altitude")) for t, r in zip(instants, tous)],
+                                         5000 if seance.get("sport") == "cycling" else 1000) if connues else [],
+            "tours": [{"duree_s": l.get("total_elapsed_time"), "distance_m": l.get("total_distance"), "fc_moy": l.get("avg_heart_rate"),
+                       "fc_max": l.get("max_heart_rate")} for l in tours] if len(tours) > 1 else [],
+            "points": [[round(secondes(r)), degres(r.get("position_lat")), degres(r.get("position_long")), r.get("heart_rate"),
+                        None if r.get("altitude") is None else round(r["altitude"], 1), vitesse(i), cadence(r),
+                        r.get("power") or None] for i, r in enumerate(points)]}

@@ -24,7 +24,7 @@ montre: montre-garmin
 # Parcours et entraînements en attente du prochain branchement de la montre (relais.py vers-montre)
 vers_montre: vers-montre
 
-# Copie des pas, du sommeil et des pesées de Garmin Connect (relais.py sante, lecture seule)
+# Copie des pas, du sommeil, des pesées et du détail des journées de Garmin Connect (relais.py sante, lecture seule)
 garmin_connect: garmin-connect
 
 # Anciennes versions des activités, jamais effacées par l'outil

@@ -8,10 +8,10 @@ Rassemble dix ans d'activités sportives éparpillées entre plusieurs applis (G
 Smashrun, Runalyze, Moves, TomTom, Withings, Zepp, Health Sync, montre Garmin) en **une activité FIT par sortie réelle** :
 doublons regroupés entre applis, fuseaux horaires corrigés, totaux journaliers et trajets en véhicule écartés, morceaux de
 détection automatique recollés. Les activités peuvent ensuite être envoyées vers Garmin Connect, Strava, intervals.icu,
-Runalyze et Endurain (auto-hébergé), avec une petite interface web.
+Runalyze et Smashrun, et se consultent dans une interface web, avec leur trace et leurs courbes.
 
 - `outils/` : l'outil en ligne de commande `relais.py` et son interface web (voir [outils/LISEZ-MOI.md](outils/LISEZ-MOI.md))
-- `endurain/` : `docker-compose.yml` pour Endurain et l'interface web (copier `.env.example` en `.env`)
+- `endurain/` : `docker-compose.yml` de l'interface web (copier `.env.example` en `.env`)
 - `chemins.exemple.yml` : à copier en `chemins.yml` pour indiquer où sont vos exports et où ranger les résultats
   (sans ce fichier, tout est dans le dossier du projet)
 

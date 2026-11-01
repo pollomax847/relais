@@ -3,29 +3,32 @@
 
   relais.py preparer     conversion précise de toutes les sources (sources-brutes/, ZIP compris) : une activité
                          par sortie réelle, en FIT, rangée par catégorie dans activites-v2/ (+ contrôle)
-  relais.py sante        pas, poids et sommeil de toutes les sources → sante/, Endurain (et les pesées → Garmin)
-  relais.py envoyer <garmin|strava|intervals|runalyze|endurain|smashrun> [N] [--reessayer]
+  relais.py sante        pas, poids et sommeil de toutes les sources → sante/ (et les pesées → Garmin)
+  relais.py envoyer <garmin|strava|intervals|runalyze|smashrun> [N] [--reessayer]
                          envoie tout ce qui reste de activites-v2/ (ou N activités), de la plus ancienne à la plus
                          récente, au rythme permis par le service
   relais.py lots <destination> [--importes]
                          copie les activités pas encore envoyées en lots à importer à la main sur le site du service
                          (quand son API bloque un gros historique) ; --importes les note envoyées une fois l'import fait
-  relais.py montre       sauvegarde la montre branchée, envoie ses nouvelles activités à Endurain et lui dépose
+  relais.py montre       sauvegarde la montre branchée et lui dépose
                          les parcours et entraînements en attente
   relais.py vers-montre <trace.gpx|.tcx|.fit>… [--nom NOM]
                          prépare des parcours à suivre sur la montre (itinéraire AllTrails, activité à refaire…)
   relais.py vers-montre garmin [nom ou numéro…]
                          parcours et entraînements de Garmin Connect pour la montre (sans nom : la liste)
+  relais.py garmin       récupère chez Garmin les nouvelles activités de la montre, puis refait la bibliothèque
+  relais.py collecte [AAAA-MM-JJ [AAAA-MM-JJ]]  le code de garmin-grafana (garmin_grafana/), base locale : les 3 derniers jours, ou la période
   relais.py auto         tout en une fois : montre, conversion, santé, envois choisis (SPORT_AUTO_DESTINATIONS)
   relais.py refaire garmin   retire de Garmin ce que l'ancienne version y a envoyé (avant d'envoyer activites-v2)
   relais.py satellites   met à jour les données satellites (EPO) de la montre branchée, pour un GPS plus rapide
-  relais.py etat         montre branchée ? Endurain en marche ?
+  relais.py etat         montre branchée ? archive ?
 
-Configuration (identifiants Endurain, clés des services) : ~/.config/sport/sport.env. Interface : http://localhost:8090
+Configuration (clés des services) : ~/.config/sport/sport.env. Interface : http://localhost:8090
 """
 import csv
 import fcntl
 import getpass
+import io
 import json
 import logging
 import os
@@ -38,7 +41,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
+import zipfile
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -65,23 +68,21 @@ def chemin(valeur):
 
 CHEMINS = lire_chemins()
 ARCHIVE = chemin(CHEMINS.get("montre", "montre-garmin"))
-ENVOYES = ARCHIVE / ".envoyes.txt"
 CONFIG = Path.home() / ".config" / "sport" / "sport.env"
-DOSSIER_IMPORT = PROJET / "endurain" / "data" / "backend" / "data" / "activity_files" / "bulk_import" / "1"
 JETONS_GARMIN = Path.home() / ".config" / "sport" / "garmin-jetons"
 JETONS_STRAVA = Path.home() / ".config" / "sport" / "strava.json"
 VENV = Path.home() / ".local" / "share" / "sport" / "venv"
 VERROU = PROJET / "outils" / ".verrou"
-COMMANDES_EXCLUSIVES = {"envoyer", "sante", "auto", "refaire", "retirer", "preparer", "lots"}
+COMMANDES_EXCLUSIVES = {"envoyer", "sante", "auto", "refaire", "retirer", "preparer", "lots", "garmin", "collecte"}
 V2 = chemin(CHEMINS.get("activites", "activites-v2"))  # conversion précise : une activité par sortie réelle (relais.py preparer)
 CORBEILLE = chemin(CHEMINS.get("corbeille", "a-supprimer"))  # anciennes versions de activites-v2 (jamais effacées par l'outil)
 VERS_MONTRE = chemin(CHEMINS.get("vers_montre", "vers-montre"))  # parcours et entraînements à déposer sur la montre
 SANTE = chemin(CHEMINS.get("sante", "sante"))  # pas, poids et sommeil retenus, en CSV lisibles
-ETAT_SANTE = PROJET / "outils" / ".sante-endurain.json"  # ce qui a déjà été envoyé à Endurain
 POIDS_GARMIN = PROJET / "outils" / ".poids-garmin.txt"  # pesées créées sur Garmin par l'outil (jour, kg)
-GARMIN_CONNECT = chemin(CHEMINS.get("garmin_connect", "garmin-connect"))  # copie des pas et pesées de Garmin Connect
+GARMIN_CONNECT = chemin(CHEMINS.get("garmin_connect", "garmin-connect"))  # copie de Garmin Connect : pas, nuits, pesées, résumés du jour, détail à la minute
 GARMIN_DEPUIS = 2008  # première année demandée à Garmin Connect (ouverture du service)
 PAUSE_GARMIN = 1  # secondes entre deux demandes à Garmin Connect, au rythme d'un client ordinaire
+MINUTE_RECUL, MINUTE_RELUS, MINUTE_VIDES = 200, 3, 7  # détail à la minute : jours en arrière au plus, jours relus, jours vides pour s'arrêter
 AUTO_GARMIN = 300  # activités envoyées par destination et par passage automatique (SPORT_AUTO_NOMBRE dans sport.env)
 
 # Toutes les sources lues par « inventaire » et « historique » : « donnees » et « sources » de chemins.yml.
@@ -91,7 +92,7 @@ SOURCES = {"projet": chemin(CHEMINS.get("donnees", ".")),
 # Google Drive/sport n'est plus lu par défaut : tout son contenu est déjà copié dans sport/ (inventaire du 25/10/2026 :
 # aucune activité unique) et ce disque NTFS est très lent quand il est occupé. Pour le relire :
 #   relais.py convertir "<disque>/Google Drive/sport"
-# Dans le projet : outils, documentation et la copie de travail d'Endurain ne sont pas des données
+# Dans le projet : outils, documentation et le dossier Docker ne sont pas des données
 EXCLUS_PROJET = {"endurain", "outils", "scripts", "documentation", "sante", "a-supprimer", "activites-v2", "analyse",
                  "a-importer",  # lots préparés pour un import manuel (relais.py lots) : des copies de activites-v2
                  SANTE.name, CORBEILLE.name, V2.name, VERS_MONTRE.name,
@@ -103,13 +104,12 @@ DOSSIERS_MONTRE = ["Activity", "Monitor", "Sleep", "Summary", "Records", "Totals
 
 
 def config():
-    conf = {"ENDURAIN_URL": "http://localhost:8080"}
+    conf = {}
     if CONFIG.exists():
         for ligne in CONFIG.read_text().splitlines():
             if "=" in ligne and not ligne.lstrip().startswith("#"):
                 cle, valeur = ligne.split("=", 1)
                 conf[cle.strip()] = valeur.strip()
-    conf.update({k: v for k, v in os.environ.items() if k.startswith("ENDURAIN_")})
     return conf
 
 
@@ -133,29 +133,6 @@ def trouver_montre():
         except OSError:
             continue
     return None
-
-
-def endurain_actif(conf):
-    try:
-        with urllib.request.urlopen(conf["ENDURAIN_URL"] + "/api/v1/about", timeout=5):
-            return True
-    except (urllib.error.URLError, OSError):
-        return False
-
-
-def envoyer_activite(conf, fichier):
-    """Envoie un .fit à Endurain. L'import se fait en arrière-plan et Endurain ignore les doublons."""
-    limite = uuid.uuid4().hex
-    corps = (f"--{limite}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{fichier.name}\"\r\n"
-             "Content-Type: application/octet-stream\r\n\r\n").encode() + fichier.read_bytes() + f"\r\n--{limite}--\r\n".encode()
-    req = urllib.request.Request(
-        conf["ENDURAIN_URL"] + "/api/v1/activities/upload", data=corps, method="POST",
-        headers={"X-API-Key": conf["ENDURAIN_API_KEY"],
-                 "Content-Type": f"multipart/form-data; boundary={limite}",
-                 # même fichier = même clé : un nouvel essai après une coupure ne crée pas de doublon
-                 "Idempotency-Key": f"garmin-{fichier.name}-{fichier.stat().st_size}"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read())
 
 
 def cmd_montre():
@@ -186,30 +163,7 @@ def cmd_montre():
     deposes = deposer_sur_montre(montre)
     if deposes:
         notifier(f"{deposes} parcours ou entraînement(s) déposés sur la montre : débranchez-la pour qu'elle les importe.")
-
-    conf = config()
-    if not conf.get("ENDURAIN_API_KEY"):
-        notifier(f"Montre sauvegardée ({copies} fichiers). Pas de clé d'API dans {CONFIG} : rien n'est envoyé à Endurain.")
-        return
-    if not endurain_actif(conf):
-        notifier(f"Montre sauvegardée ({copies} fichiers). Endurain ne répond pas : relancez « relais.py montre » une fois Endurain démarré.")
-        return
-
-    deja = set(ENVOYES.read_text().split()) if ENVOYES.exists() else set()
-    envoyes = []
-    for fichier in sorted((ARCHIVE / "Activity").glob("*.[fF][iI][tT]")):
-        if fichier.name in deja:
-            continue
-        try:
-            envoyer_activite(conf, fichier)
-        except urllib.error.HTTPError as e:
-            print(f"  {fichier.name} : refusé par Endurain ({e.code} {e.read().decode()[:200]})")
-            continue
-        envoyes.append(fichier.name)
-        print(f"  {fichier.name} : envoyé")
-    with ENVOYES.open("a") as f:
-        f.writelines(nom + "\n" for nom in envoyes)
-    notifier(f"Montre sauvegardée ({copies} fichiers), {len(envoyes)} nouvelle(s) activité(s) envoyée(s) à Endurain.")
+    notifier(f"Montre sauvegardée ({copies} fichiers).")
 
 
 EPO_URL = "https://epodownload.mediatek.com/EPO.DAT"  # la source de Garmin pour ses puces MediaTek
@@ -389,15 +343,10 @@ def cmd_etat():
     else:
         print("Montre       : non branchée")
 
-    conf = config()
-    print(f"Endurain     : {'en marche' if endurain_actif(conf) else 'arrêté'} ({conf['ENDURAIN_URL']})")
-    print(f"Clé d'API    : {'configurée' if conf.get('ENDURAIN_API_KEY') else 'absente'} ({CONFIG})")
-
     if ARCHIVE.exists():
         detail = ", ".join(f"{d.name} {sum(1 for f in d.rglob('*') if f.is_file())}"
                            for d in sorted(ARCHIVE.iterdir()) if d.is_dir())
-        nb_envoyes = len(ENVOYES.read_text().split()) if ENVOYES.exists() else 0
-        print(f"Archive      : {detail} ; {nb_envoyes} activité(s) déjà envoyée(s)")
+        print(f"Archive      : {detail}")
     else:
         print("Archive      : vide (lancez « relais.py montre »)")
 
@@ -444,8 +393,8 @@ def connexion_garmin():
     return api
 
 
-DESTINATIONS = ("garmin", "strava", "intervals", "runalyze", "endurain", "smashrun")
-PAUSES = {"garmin": 5, "strava": 10, "intervals": 1, "runalyze": 5, "endurain": 3,
+DESTINATIONS = ("garmin", "strava", "intervals", "runalyze", "smashrun")
+PAUSES = {"garmin": 5, "strava": 10, "intervals": 1, "runalyze": 5,
           "smashrun": 15}  # s entre deux envois (Smashrun : 250 requêtes par heure)
 SPORTS_ACCEPTES = {"smashrun": {"running"}}  # les autres activités ne sont pas proposées à ces services
 DISTANCE_EXIGEE = {"smashrun"}  # une activité sans distance n'est pas proposée à ces services
@@ -497,8 +446,6 @@ def destination(nom):
         return destinations.Intervals(conf)
     if nom == "runalyze":
         return destinations.Runalyze(conf)
-    if nom == "endurain":
-        return destinations.Endurain(conf)
     if nom == "smashrun":
         return destinations.Smashrun(conf)
     raise ValueError(f"destination inconnue : {nom} (possibles : {', '.join(DESTINATIONS)})")
@@ -732,90 +679,6 @@ def cmd_lots():
     print(f"  importez chaque lot sur le site, puis : relais.py lots {nom} --importes")
 
 
-class Endurain:
-    """Session sur l'API d'Endurain avec un compte utilisateur (la clé d'API ne sert qu'à envoyer des activités).
-
-    Identifiants : ENDURAIN_USER / ENDURAIN_PASSWORD dans sport.env (enregistrés depuis l'interface web),
-    sinon le mot de passe est demandé dans le terminal.
-    """
-
-    def __init__(self, conf):
-        self.url = conf["ENDURAIN_URL"] + "/api/v1"
-        self.utilisateur = conf.get("ENDURAIN_USER", "admin")
-        self.mot_de_passe = conf.get("ENDURAIN_PASSWORD")
-        if not self.mot_de_passe:
-            if not sys.stdin.isatty():
-                raise RuntimeError("identifiants Endurain absents : enregistrez-les dans l'interface web")
-            self.mot_de_passe = getpass.getpass(f"Mot de passe Endurain pour {self.utilisateur} : ")
-        self.jeton = None
-
-    def _connexion(self):
-        corps = urllib.parse.urlencode({"username": self.utilisateur, "password": self.mot_de_passe}).encode()
-        req = urllib.request.Request(self.url + "/auth/login", data=corps, method="POST",
-                                     headers={"X-Client-Type": "mobile", "Content-Type": "application/x-www-form-urlencoded"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                self.jeton = json.loads(resp.read())["access_token"]
-        except urllib.error.HTTPError as e:
-            if e.code in (400, 401):
-                raise RuntimeError(f"Endurain refuse l'utilisateur « {self.utilisateur} » ou son mot de passe") from e
-            raise
-
-    def appel(self, methode, chemin, donnees=None):
-        for essai in (1, 2):  # le jeton dure 15 min : on se reconnecte une fois s'il a expiré
-            if not self.jeton:
-                self._connexion()
-            req = urllib.request.Request(
-                self.url + chemin, method=methode, data=json.dumps(donnees).encode() if donnees is not None else None,
-                headers={"X-Client-Type": "mobile", "Authorization": f"Bearer {self.jeton}", "Content-Type": "application/json"})
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    return json.loads(resp.read() or "null")
-            except urllib.error.HTTPError as e:
-                if e.code == 401 and essai == 1:
-                    self.jeton = None
-                    continue
-                raise
-
-
-def lancer_import_endurain(session):
-    """Démarre l'import du dossier bulk_import d'Endurain (équivalent du bouton Paramètres → Import)."""
-    if not any(f.is_file() for f in DOSSIER_IMPORT.rglob("*")):
-        print("Endurain : rien de nouveau dans le dossier d'import")
-        return
-    try:
-        session.appel("POST", "/activities/bulk-import/folder?source=generic")
-        print("Endurain : import du dossier lancé (il continue en arrière-plan)")
-    except urllib.error.HTTPError as e:
-        print("Endurain : un import est déjà en cours" if e.code == 409 else f"Endurain : import refusé ({e.code})")
-
-
-def sante_endurain(session, pas, poids, sommeil):
-    """Envoie à Endurain les jours nouveaux ou modifiés (Endurain garde une valeur par jour et la remplace)."""
-    import sante
-
-    etat = json.loads(ETAT_SANTE.read_text()) if ETAT_SANTE.exists() else {}
-    a_envoyer = ([("/health/steps", f"pas:{j}", sante.json_pas(j, n)) for j, (n, _) in pas.items()]
-                 + [("/health/weight", f"poids:{j}", sante.json_poids(p)) for j, p in poids.items()]
-                 + [("/health/sleep", f"sommeil:{j}", sante.json_sommeil(s)) for j, s in sommeil.items()])
-    compte = Counter()
-    for n, (chemin, cle, corps) in enumerate(a_envoyer, 1):
-        signature = json.dumps(corps, sort_keys=True)
-        if etat.get(cle) == signature:
-            continue
-        try:
-            session.appel("POST", chemin, corps)
-            etat[cle] = signature
-            compte[cle.split(":")[0]] += 1
-        except urllib.error.HTTPError as e:
-            compte["refusés"] += 1
-            print(f"  refusé par Endurain : {cle} ({e.code} {e.read().decode()[:150]})")
-        if n % 500 == 0:
-            ETAT_SANTE.write_text(json.dumps(etat))
-    ETAT_SANTE.write_text(json.dumps(etat))
-    print("Endurain : " + (", ".join(f"{v} {k}" for k, v in compte.items()) or "déjà à jour"))
-
-
 def poids_garmin(api, poids):
     """Synchronise les pesées retenues avec Garmin Connect (Garmin n'accepte ni les pas ni le sommeil).
 
@@ -868,12 +731,13 @@ def poids_garmin(api, poids):
 
 
 def copier_garmin(api):
-    """Copie en lecture seule les pas du jour, les nuits et les pesées de Garmin Connect dans GARMIN_CONNECT, un fichier
-    par type et par année (garmin-connect-pas-AAAA.json…), lus ensuite par sante.py comme les autres sources.
+    """Copie en lecture seule les pas du jour, les nuits, les pesées et les résumés de chaque journée de Garmin Connect
+    dans GARMIN_CONNECT, un fichier par type et par année (garmin-connect-pas-AAAA.json…), lus ensuite par sante.py comme
+    les autres sources, et le détail des journées, deux fichiers par jour dans minute/.
 
-    Une année copiée jusqu'au 31/12 n'est plus redemandée : après la première fois (une centaine de demandes par type), un
-    passage n'en fait que trois ou quatre (les 7 derniers jours de pas et de sommeil, les pesées de l'année). Pas et
-    sommeil commencent avec la montre : on remonte le temps jusqu'à deux années vides de suite. Les pesées que l'outil a lui-même créées sur
+    Une année copiée jusqu'au 31/12 n'est plus redemandée : après la première fois (une centaine de demandes par type, 9
+    pour les résumés, qui tiennent en une demande par année), un passage n'en fait plus qu'une vingtaine. Pas, sommeil et
+    résumés commencent avec la montre : on remonte le temps jusqu'à deux années vides de suite. Les pesées que l'outil a lui-même créées sur
     Garmin (POIDS_GARMIN) sont laissées de côté : ce sont des copies des autres sources.
     """
     envoyees = {}
@@ -915,6 +779,48 @@ def copier_garmin(api):
     sommeil = par_jour(api.get_sleep_daily, lambda l: (l.get("values") or {}).get("totalSleepTimeInSeconds") and
                        {"calendarDate": l["calendarDate"], **{k: v for k, v in l["values"].items() if v is not None}})
 
+    def resume(annee, ancien, fin):
+        reponse = demander(api.get_daily_summaries, f"{annee}-01-01", fin.isoformat()) or {}
+        return [j for j in reponse.get("data", []) if j.get("includesWellnessData")]
+
+    def minute(jour):
+        coeur = demander(api.get_heart_rates, jour) or {}
+        stress = demander(api.get_stress_data, jour) or {}
+        return {"fc": [l for l in coeur.get("heartRateValues") or [] if l[1]],
+                "stress": [l for l in stress.get("stressValuesArray") or [] if l[1] is not None and l[1] >= 0],
+                "batterie": [[l[0], l[2]] for l in stress.get("bodyBatteryValuesArray") or [] if l[2] is not None]}
+
+    def nuit(jour):
+        """Pas par quart d'heure, et la nuit terminée ce jour-là : phases, mouvements, FC, stress et Body Battery."""
+        sommeil = demander(api.get_sleep_data, jour) or {}
+        pas = demander(api.get_steps_data, jour) or []
+        return {"pas": pas if any(l.get("steps") for l in pas) else [],  # Garmin renvoie 96 quarts d'heure à zéro pour un jour archivé
+                "sommeil": {c: sommeil.get(c) for c in ("dailySleepDTO", "sleepLevels", "sleepMovement", "sleepHeartRate",
+                                                        "sleepStress", "sleepBodyBattery")} if sommeil.get("sleepLevels") else {}}
+
+    def journees(nom, lire):
+        """Garmin ne garde le détail des journées que quelques mois (11/07/2026 présent, 01/06 absent le 01/11) : chaque
+        journée terminée est copiée pour de bon. Du plus récent au plus ancien, jusqu'à MINUTE_VIDES jours vides de suite ;
+        les MINUTE_RELUS derniers jours sont relus, car la montre a pu synchroniser depuis."""
+        dossier = GARMIN_CONNECT / "minute"
+        dossier.mkdir(exist_ok=True)
+        copies = vides = 0
+        for recul in range(1, MINUTE_RECUL + 1):
+            jour = (aujourdhui - timedelta(days=recul)).isoformat()
+            fichier = dossier / f"garmin-connect-{nom}-{jour}.json"
+            if fichier.exists() and recul > MINUTE_RELUS:
+                vides = 0
+                continue
+            valeurs = lire(jour)
+            if any(valeurs.values()):
+                fichier.write_text(json.dumps(valeurs))
+                copies, vides = copies + 1, 0
+            else:
+                vides += 1
+                if vides == MINUTE_VIDES:
+                    break
+        return copies
+
     def poids(annee, ancien, fin):
         valeurs = []
         reponse = demander(api.get_weigh_ins, f"{annee}-01-01", fin.isoformat()) or {}
@@ -951,13 +857,205 @@ def copier_garmin(api):
     try:
         jours_pas = remonter("pas", pas)
         nuits = remonter("sommeil", sommeil)
+        resumes = remonter("jour", resume)
         for annee in range(GARMIN_DEPUIS, aujourdhui.year + 1):
             pesees += sum(len(j["allWeightMetrics"]) for j in copier("poids", annee, poids))
+        journees_minute, journees_nuit = journees("minute", minute), journees("nuit", nuit)
     except Exception as e:  # trop de demandes, coupure… : les années déjà copiées sont gardées, la suite au prochain passage
         print(f"Garmin Connect : copie interrompue après {demandes} demande(s) ({e}), reprise au prochain passage")
         return
-    print(f"Garmin Connect : {jours_pas} jours de pas, {nuits} nuits et {pesees} pesée(s) en copie dans {GARMIN_CONNECT} "
+    print(f"Garmin Connect : {jours_pas} jours de pas, {nuits} nuits, {resumes} résumés du jour, {pesees} pesée(s) et "
+          f"{journees_minute} journée(s) à la minute et {journees_nuit} au quart d'heure en copie dans {GARMIN_CONNECT} "
           f"({demandes} demande(s), lecture seule)")
+
+
+def copier_activites_garmin(api):
+    """Télécharge chez Garmin le FIT d'origine des activités enregistrées par une montre, dans Activity/garmin-connect/ de
+    la sauvegarde de la montre, où « preparer » les lit comme les siennes : une sortie arrive ainsi dans la bibliothèque
+    sans branchement USB. Seules les activités d'un appareil Garmin (« manufacturer » GARMIN, avec un deviceId) sont prises :
+    celles que relais.py a envoyées sont DEVELOPMENT, et les reprendre créerait une boucle de synchro. La liste complète du
+    compte reste dans garmin-connect-liste-AAAA.json ; une année terminée n'est plus relue. Renvoie le nombre de nouvelles activités."""
+    dossier = ARCHIVE / "Activity" / "garmin-connect"
+    dossier.mkdir(parents=True, exist_ok=True)
+    GARMIN_CONNECT.mkdir(parents=True, exist_ok=True)
+    aujourdhui = date.today()
+    demandes = nouvelles = 0
+
+    def liste(annee):
+        nonlocal demandes
+        fichier = GARMIN_CONNECT / f"garmin-connect-liste-{annee}.json"
+        fin = min(date(annee, 12, 31), aujourdhui)
+        ancien = json.loads(fichier.read_text()) if fichier.exists() else {"jusqu_au": None, "valeurs": []}
+        if annee < aujourdhui.year and ancien["jusqu_au"] == fin.isoformat():
+            return ancien["valeurs"]
+        debut = date(annee, 1, 1)
+        if ancien["jusqu_au"]:
+            debut = max(debut, date.fromisoformat(ancien["jusqu_au"]) - timedelta(days=7))
+        vues = {a["activityId"]: a for a in ancien["valeurs"]}
+        while debut <= fin:  # mois par mois : Garmin refuse de lister au-delà de 10 000 activités, et une année en a davantage
+            bout = min(date(debut.year + debut.month // 12, debut.month % 12 + 1, 1) - timedelta(days=1), fin)
+            rang = 0
+            while True:
+                page = api.connectapi(api.garmin_connect_activities, params={
+                    "startDate": debut.isoformat(), "endDate": bout.isoformat(), "start": str(rang), "limit": "1000"}) or []
+                demandes += 1
+                time.sleep(PAUSE_GARMIN)
+                for a in page:
+                    vues[a["activityId"]] = {"activityId": a["activityId"], "startTimeGMT": a.get("startTimeGMT"), "activityName": a.get("activityName"),
+                                             "deviceId": a.get("deviceId"), "manufacturer": a.get("manufacturer"), "typeKey": (a.get("activityType") or {}).get("typeKey"),
+                                             "duration": a.get("duration"), "distance": a.get("distance")}
+                rang += len(page)
+                if len(page) < 1000:
+                    break
+            debut = bout + timedelta(days=1)
+        valeurs = sorted(vues.values(), key=lambda a: a["startTimeGMT"] or "")
+        fichier.write_text(json.dumps({"jusqu_au": fin.isoformat(), "valeurs": valeurs}))
+        return valeurs
+
+    total = vides = 0
+    try:
+        for annee in range(aujourdhui.year, GARMIN_DEPUIS - 1, -1):
+            tout = liste(annee)
+            activites = [a for a in tout if a.get("manufacturer") == "GARMIN" and a.get("deviceId")]
+            total += len(activites)
+            vides = 0 if tout else vides + 1
+            for a in activites:
+                fit = dossier / f"{a['activityId']}.fit"
+                if fit.exists():
+                    continue
+                archive = api.download_activity(a["activityId"], dl_fmt=api.ActivityDownloadFormat.ORIGINAL)
+                demandes += 1
+                time.sleep(PAUSE_GARMIN)
+                with zipfile.ZipFile(io.BytesIO(archive)) as z:
+                    noms = [n for n in z.namelist() if n.lower().endswith(".fit")]
+                    if noms:
+                        fit.write_bytes(z.read(noms[0]))
+                        nouvelles += 1
+            if vides == 2:
+                break
+    except Exception as e:  # les activités déjà copiées sont gardées, la suite au prochain passage
+        print(f"Garmin Connect : copie des activités interrompue après {demandes} demande(s) ({e}), reprise au prochain passage")
+        return nouvelles
+    print(f"Garmin Connect : {total} activités de la montre, {nouvelles} nouvelle(s) ({demandes} demande(s), lecture seule)")
+    return nouvelles
+
+
+COLLECTE = "daily_avg,sleep,steps,heartrate,stress,breathing,hrv,fitness_age,vo2,race_prediction,body_composition,lifestyle," \
+           "hydration,training_readiness,training_status,hill_score,endurance_score,blood_pressure"  # tout sauf activity : voir copier_activites_garmin
+
+
+def collecte_garmin_grafana(api, debut, fin):
+    """Le code de garmin-grafana, inchangé (garmin_grafana/), avec la session de relais.py et une base locale à la place d'InfluxDB."""
+    GARMIN_CONNECT.mkdir(parents=True, exist_ok=True)
+    os.environ.update(GARMIN_GRAFANA_BASE=str(GARMIN_CONNECT / "garmin-grafana.sqlite"), FETCH_SELECTION=COLLECTE, IGNORE_ERRORS="True",
+                      USER_TIMEZONE="Europe/Paris", RATE_LIMIT_CALLS_SECONDS=str(PAUSE_GARMIN), LOG_LEVEL="WARNING")
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "garmin_grafana"))
+    import garmin_fetch
+
+    garmin_fetch.garmin_obj = api
+    garmin_fetch.fetch_write_bulk(debut, fin)
+    print(f"garmin-grafana : collecte du {debut} au {fin} dans {GARMIN_CONNECT / 'garmin-grafana.sqlite'}")
+
+
+def cmd_collecte():
+    """relais.py collecte [début [fin]] : par défaut les 3 derniers jours. Une période longue prend environ 30 s par jour."""
+    utiliser_venv()
+    args = sys.argv[2:]
+    debut = args[0] if args else (date.today() - timedelta(days=3)).isoformat()
+    collecte_garmin_grafana(connexion_garmin(), debut, args[1] if len(args) > 1 else date.today().isoformat())
+
+
+def copier_compte_garmin(api):
+    """Le reste du compte, en lecture seule, dans garmin-connect/compte.json : appareils, records, badges, matériel, objectifs,
+    défis, plans, entraînements et parcours. Ni le nom ni l'adresse du profil : ils ne servent à rien ici. Une rubrique que Garmin
+    refuse reste simplement vide. S'y ajoutent les séries de musculation de chaque séance, dans exercices/<activité>.json."""
+    def lire(fonction, *args, **options):
+        time.sleep(PAUSE_GARMIN)
+        try:
+            return fonction(*args, **options)
+        except Exception as e:
+            print(f"Garmin Connect : {fonction.__name__} indisponible ({str(e)[:80]})")
+            return None
+
+    base = lire(api.get_user_profile_base) or {}
+    numero = str(base.get("userProfilePk") or "")
+    materiel = (lire(api.get_gear, numero) or []) if numero else []
+    for g in materiel:
+        g["stats"] = lire(api.get_gear_stats, g["uuid"])
+    compte = {"date": date.today().isoformat(), "appareils": lire(api.get_devices), "records": lire(api.get_personal_record), "badges": lire(api.get_earned_badges),
+              "materiel": materiel, "objectifs": {etat: lire(api.get_goals, etat) for etat in ("active", "future", "past")}, "defis": lire(api.get_adhoc_challenges, 0, 100),
+              "plans": lire(api.get_training_plans), "entrainements": lire(api.get_workouts), "parcours": lire(api.get_courses) if hasattr(api, "get_courses") else None}
+    GARMIN_CONNECT.mkdir(parents=True, exist_ok=True)
+    (GARMIN_CONNECT / "compte.json").write_text(json.dumps(compte, ensure_ascii=False))
+
+    dossier = GARMIN_CONNECT / "exercices"
+    dossier.mkdir(exist_ok=True)
+    copies = 0
+    for fichier in GARMIN_CONNECT.glob("garmin-connect-liste-*.json"):
+        for a in json.loads(fichier.read_text())["valeurs"]:
+            cible = dossier / f"{a['activityId']}.json"
+            if a.get("typeKey") == "strength_training" and a.get("manufacturer") == "GARMIN" and not cible.exists():
+                series = lire(api.get_activity_exercise_sets, a["activityId"])
+                if series:
+                    cible.write_text(json.dumps(series, ensure_ascii=False))
+                    copies += 1
+    print(f"Garmin Connect : compte copié ({len(compte['records'] or [])} records, {len(compte['badges'] or [])} badges, {copies} séance(s) de musculation détaillée(s))")
+
+
+def cmd_reconvertir():
+    """La conversion demandée à la main : les statistiques suivent la bibliothèque."""
+    utiliser_venv()
+    cmd_preparer()
+    ecrire_performance()
+
+
+def cmd_garmin():
+    """Récupère les nouvelles activités de la montre chez Garmin et, s'il y en a, refait la bibliothèque."""
+    utiliser_venv()
+    if copier_activites_garmin(connexion_garmin()):
+        cmd_preparer()
+        ecrire_performance()
+
+
+def copier_smashrun():
+    """Copie en lecture seule, dans sante/smashrun.json, ce que seul Smashrun sait : météo de chaque course, badges et
+    statistiques. Une dizaine de demandes par passage. Son jeton dure 12 semaines : s'il a expiré, la copie précédente reste."""
+    conf = config()
+    if not conf.get("SMASHRUN_TOKEN"):
+        return
+    import destinations
+
+    def lire(chemin):
+        time.sleep(PAUSE_GARMIN)
+        statut, reponse = destinations._requete(destinations.Smashrun.URL + chemin, entetes={"Authorization": "Bearer " + conf["SMASHRUN_TOKEN"]})
+        if statut != 200:
+            raise RuntimeError(f"réponse {statut}")
+        return reponse
+
+    try:
+        courses, page = [], 0
+        while True:
+            lot = lire(f"/my/activities/search?count=100&page={page}")
+            courses += [{c: a.get(c) for c in ("startDateTimeLocal", "temperature", "temperatureApparent", "humidity", "windSpeed", "weatherType")} for a in lot]
+            page += 1
+            if len(lot) < 100:
+                break
+        copie = {"stats": lire("/my/stats"), "annee": lire(f"/my/stats/{date.today().year}"), "badges": lire("/my/badges"), "courses": courses}
+    except (OSError, RuntimeError, ValueError, destinations.Limite) as e:
+        print(f"Smashrun : copie non mise à jour ({e})")
+        return
+    SANTE.mkdir(parents=True, exist_ok=True)
+    (SANTE / "smashrun.json").write_text(json.dumps(copie, ensure_ascii=False))
+    print(f"Smashrun : {len(courses)} courses et {len(copie['badges'])} badges copiés")
+
+
+def ecrire_performance():
+    import performance
+
+    try:
+        performance.ecrire(V2, SANTE)
+    except OSError as e:  # bibliothèque pas encore préparée
+        print(f"Performance : non calculée ({e})")
 
 
 def faire_sante(api_garmin=None):
@@ -969,22 +1067,22 @@ def faire_sante(api_garmin=None):
         racines.append(ARCHIVE)  # sauvegarde de la montre rangée hors des sources (chemins.yml)
     if api_garmin is not None:
         copier_garmin(api_garmin)
+        copier_compte_garmin(api_garmin)
+        try:
+            collecte_garmin_grafana(api_garmin, (date.today() - timedelta(days=3)).isoformat(), date.today().isoformat())
+        except Exception as e:  # la santé et les pesées ne doivent pas en dépendre
+            print(f"garmin-grafana : collecte interrompue ({e})")
     racines.append(GARMIN_CONNECT)  # exclu des autres racines : lu ici seulement
     pas, poids, sommeil, montre, lus = sante.collecter(racines, EXCLUS_PROJET | {"convertis", SANTE.name})
     print(f"  {lus['pas']} valeurs de pas, {lus['poids']} pesées, {lus['sommeil']} nuits lues ; {lus['écartés']} vides ou aberrantes écartées")
     print(f"  retenu après dédoublonnage : {len(pas)} jours de pas, {len(poids)} jours de poids, {len(sommeil)} nuits, "
           f"{len(montre)} journées de la montre")
     sante.ecrire_csv(SANTE, pas, poids, sommeil, montre)
-    print(f"  détail : {SANTE}/pas.csv, poids.csv, sommeil.csv, montre.csv")
+    sante.ecrire_journees_garmin(GARMIN_CONNECT, SANTE)
+    print(f"  détail : {SANTE}/pas.csv, poids.csv, sommeil.csv, montre.csv, garmin.csv")
     copier_sommeil()
-    conf = config()
-    if endurain_actif(conf):
-        try:
-            sante_endurain(Endurain(conf), pas, poids, sommeil)
-        except (RuntimeError, urllib.error.URLError) as e:
-            print(f"Endurain : non envoyé ({e})")
-    else:
-        print("Endurain : ne répond pas, rien n'est envoyé")
+    copier_smashrun()
+    ecrire_performance()
     if api_garmin is not None:
         poids_garmin(api_garmin, poids)
 
@@ -1018,14 +1116,18 @@ def cmd_auto():
         except SystemExit as e:
             print(e)
 
-    etape("Conversion précise de toutes les sources (activites-v2)")
-    cmd_preparer()
-
     api = None
     try:
         api = connexion_garmin()
     except Exception as e:
-        print(f"Garmin : pas de connexion ({e}), les pesées ne sont pas envoyées")
+        print(f"Garmin : pas de connexion ({e}), ses activités ne sont pas lues et les pesées pas envoyées")
+    if api is not None:
+        etape("Activités de la montre sur Garmin Connect")
+        copier_activites_garmin(api)
+
+    etape("Conversion précise de toutes les sources (activites-v2)")
+    cmd_preparer()
+
     etape("Pas, poids et sommeil")
     faire_sante(api)
 
@@ -1113,15 +1215,6 @@ def sur_le_service(nom):
             return [(a["activityId"], datetime.fromisoformat(a["startTimeGMT"]).replace(tzinfo=timezone.utc), a.get("duration") or 0,
                      a.get("distance")) for a in api.get_activities_by_date(jour.isoformat(), (jour + timedelta(days=1)).isoformat()) or []]
         return liste, api.delete_activity
-    if nom == "endurain":
-        session = Endurain(config())
-
-        def liste(jour):
-            r = session.appel("GET", f"/activities?start_date={jour - timedelta(days=1)}&end_date={jour + timedelta(days=1)}"
-                                     "&page_number=1&num_records=200")
-            return [(a["id"], datetime.fromisoformat(a["start_time"]), a.get("total_elapsed_time") or 0, a.get("distance"))
-                    for a in r["items"]]
-        return liste, lambda i: session.appel("DELETE", f"/activities/{i}")
     if nom == "smashrun":
         service = destinations.Smashrun(config())
         toutes = service.activites()
@@ -1130,7 +1223,7 @@ def sur_le_service(nom):
 
 
 def cmd_retirer():
-    """relais.py retirer <garmin|endurain|smashrun> [--essai] : retire du service les activités que relais.py y a
+    """relais.py retirer <garmin|smashrun> [--essai] : retire du service les activités que relais.py y a
     envoyées et qui ne sont plus dans activites-v2/ (voir orphelines). Sur le service, on cherche la même durée (2 % +
     30 s), la même distance (2 % + 20 m, ou aucune) et le même départ (1 min, ou un peu plus tard : le service prend
     parfois le premier point de la trace) : l'exemplaire gardé, parti à la même seconde mais plus long, n'est pas touché.
@@ -1145,7 +1238,7 @@ def cmd_retirer():
     print(f"{nom} : {len(a_retirer)} activité(s) envoyée(s) qui ne sont plus dans la bibliothèque")
     if not a_retirer:
         return
-    if nom not in ("garmin", "endurain", "smashrun"):
+    if nom not in ("garmin", "smashrun"):
         for fichier, _, debut, duree in a_retirer:
             print(f"  {debut[:16].replace('T', ' ')} UTC, {duree} min : {fichier}")
         sys.exit(f"{nom} ne permet pas de retirer une activité par son API : à retirer sur son site")
@@ -1249,9 +1342,11 @@ def main():
         "envoyer": cmd_envoyer,
         "sante": cmd_sante,
         "auto": cmd_auto,
+        "garmin": cmd_garmin,
+        "collecte": cmd_collecte,
         "refaire": cmd_refaire,
         "retirer": cmd_retirer,
-        "preparer": cmd_preparer,
+        "preparer": cmd_reconvertir,
         "lots": cmd_lots,
     }
     if len(sys.argv) < 2 or sys.argv[1] not in commandes:

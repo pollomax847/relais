@@ -123,8 +123,11 @@ def regrouper(seances):
         trouve = None
         for g in ouverts:
             for m in g["membres"]:
-                if (_meme_sortie(m, s) or any(_douteux_compatible(m, s, d) for d in DECALAGES_DOUTEUX)
-                        or any(_meme_copie(m, s, d) for d in DECALAGES_VOYAGE)):
+                # l'heure de deux séances de la montre est sûre : à 2 h d'écart, ce sont deux sorties, même de durée égale
+                # (14/10/2023 : 7 min de course à 13:24, 7 min de vélo à 15:23)
+                sures = lancee_sur_montre(m) and lancee_sur_montre(s)
+                if (_meme_sortie(m, s) or (not sures and (any(_douteux_compatible(m, s, d) for d in DECALAGES_DOUTEUX)
+                                                          or any(_meme_copie(m, s, d) for d in DECALAGES_VOYAGE)))):
                     trouve = g
                     break
             if trouve:
@@ -175,6 +178,13 @@ def fusionner(membres):
 
 
 INTERIEUR_MAX = 1500  # m : une séance de montre plus lente que la marche n'est « à l'intérieur » qu'en deçà
+SEANCE_MONTRE_MIN = 60  # s : en deçà, même sur la montre, c'est un démarrage par erreur
+
+
+def lancee_sur_montre(s):
+    """Séance démarrée à la main sur la montre Garmin : les filtres de vitesse et de durée visent les détections
+    automatiques et les imports des applis. 62 séances réelles y restaient (35 de musculation), vérifié le 01/11/2026."""
+    return s.original and s.enregistreur == "Garmin"
 
 
 def decider_sport(s):
@@ -197,13 +207,13 @@ def decider_sport(s):
         return None
     if s.sport == "other":
         if not v:
-            return "sport inconnu, sans distance pour le deviner"
+            return None if lancee_sur_montre(s) else "sport inconnu, sans distance pour le deviner"
         if 2.0 <= v <= 6.5:
             s.sport, s.sous_sport = "walking", "generic"
         elif 7.5 <= v <= 16:
             s.sport, s.sous_sport = "running", "generic"
         else:
-            return f"sport inconnu, vitesse ambiguë ({v:.1f} km/h)"
+            return None if lancee_sur_montre(s) else f"sport inconnu, vitesse ambiguë ({v:.1f} km/h)"
         s.qualite.append(f"sport déduit de la vitesse ({v:.1f} km/h)")
         return None
     if v and s.sous_sport != "treadmill":
@@ -212,7 +222,7 @@ def decider_sport(s):
             s.qualite.append(f"« {'course' if s.sport == 'running' else 'marche'} » à {v:.1f} km/h : vélo")
             s.sport, s.sous_sport = "cycling", "generic"
             return None
-        if s.sport == "running" and 1.5 <= v < 5.0:
+        if s.sport == "running" and 1.5 <= v < 5.0 and not lancee_sur_montre(s):  # mode choisi sur la montre : il fait foi
             s.sport = "walking"
             s.qualite.append(f"« course » à {v:.1f} km/h : marche")
         elif s.sport == "walking" and 8.0 < v <= 16:
@@ -220,7 +230,7 @@ def decider_sport(s):
             s.qualite.append(f"« marche » à {v:.1f} km/h : course")
         mini, maxi = VITESSE.get(s.sport, (0, 999))
         if not mini <= v <= maxi:
-            return f"vitesse invraisemblable pour {s.sport} ({v:.1f} km/h)"
+            return None if lancee_sur_montre(s) else f"vitesse invraisemblable pour {s.sport} ({v:.1f} km/h)"
     return None
 
 
@@ -363,7 +373,7 @@ def decouper(s):
 def raison_duree(s):
     if s.duree > DUREE_MAX:
         return f"total journalier ou fenêtre trop longue ({s.duree / 3600:.1f} h)"
-    if s.duree < DUREE_MIN.get(s.sport, DUREE_MIN_DEFAUT):
+    if s.duree < (SEANCE_MONTRE_MIN if lancee_sur_montre(s) else DUREE_MIN.get(s.sport, DUREE_MIN_DEFAUT)):
         return f"trop courte ({s.duree / 60:.1f} min)"
     return None
 
@@ -485,7 +495,7 @@ def preparer(seances, journal=print):
         # sous le plus petit minimum, la vitesse d'un morceau de quelques secondes ne veut rien dire : il attend le
         # recollage tel quel. Entre 5 et 10 min, le sport est d'abord décidé (une « marche » à 10 km/h est une
         # course, gardée dès 5 min)
-        if s.duree < DUREE_MIN_DEFAUT and s.sport in FAMILLES_RECOLLAGE:
+        if s.duree < DUREE_MIN_DEFAUT and s.sport in FAMILLES_RECOLLAGE and not lancee_sur_montre(s):
             courts.append((s, membres))
             continue
         morceaux = decouper(s)
@@ -541,6 +551,7 @@ CATEGORIES = {  # (sport, sous-sport) → dossier de rangement ; sous-sport abse
     ("cycling", "indoor_cycling"): "velo-interieur", ("cycling", None): "velo",
     ("swimming", "lap_swimming"): "natation-piscine", ("swimming", "open_water"): "natation-eau-libre",
     ("swimming", None): "natation-piscine",
+    ("training", "yoga"): "yoga", ("training", "cardio_training"): "cardio",
     ("training", None): "musculation", ("fitness_equipment", None): "appareils",
     ("cross_country_skiing", None): "ski-de-fond", ("alpine_skiing", None): "ski", ("rowing", None): "aviron",
 }

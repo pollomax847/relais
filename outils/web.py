@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Interface web de relais.py (conteneur « relais », à côté d'Endurain).
+"""Interface web de relais.py (conteneur « relais »).
 
 Chaque bouton lance une commande relais.py et affiche sa sortie en direct. La connexion à Garmin Connect
 (mot de passe puis code MFA) se fait ici : les jetons sont enregistrés comme avec le terminal, et
-« envoyer garmin » les réutilise. Les identifiants Endurain (pour la santé et l'import automatique)
-sont enregistrés dans sport.env.
+« envoyer garmin » les réutilise. La page montre aussi la bibliothèque : chaque activité, sa carte et ses courbes.
 
 Mode automatique : « relais.py auto » est lancé chaque jour à SPORT_AUTO_HEURE (« 04:00 » par défaut,
-« non » pour le désactiver), si aucune autre commande ne tourne. Port : SPORT_WEB_PORT (8090 par défaut).
+« non » pour le désactiver), si aucune autre commande ne tourne ; « relais.py garmin » l'est chaque heure. Port : SPORT_WEB_PORT (8090 par défaut).
 """
 import csv
 import json
@@ -18,16 +17,19 @@ import sys
 import threading
 import time
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import carnet
 import relais
 
 RELAIS_PY = Path(__file__).resolve().parent / "relais.py"
 PAGE = Path(__file__).resolve().parent / "web.html"
+LEAFLET = Path(__file__).resolve().parent / "leaflet"  # carte des activités, version 1.9.4 (licence dans ce dossier)
+APPLI = Path(__file__).resolve().parent / "appli"  # icône et manifeste, pour l'installer sur un téléphone
+TAILLE_ENVOI = 50 * 2 ** 20  # octets, pour une photo ou une activité envoyée depuis la page
 PORT = int(os.environ.get("SPORT_WEB_PORT", "8090"))
-ENDURAIN_PUBLIC = os.environ.get("ENDURAIN_PUBLIC_URL", "http://localhost:8080")
 HEURE_AUTO = os.environ.get("SPORT_AUTO_HEURE", "04:00")
 PUBLIC = os.environ.get("SPORT_PUBLIC_URL", "http://localhost:8090")  # adresse de retour des autorisations
 # Smashrun rend le jeton dans le fragment de l'adresse (#access_token=…), que seul le navigateur voit : cette page le lit
@@ -98,16 +100,12 @@ def planificateur():
         time.sleep(61)
 
 
-def enregistrer_identifiants_endurain(utilisateur, mot_de_passe):
-    """Vérifie les identifiants auprès d'Endurain puis les écrit dans sport.env (lisible par vous seul)."""
-    conf = relais.config()
-    conf.update(ENDURAIN_USER=utilisateur, ENDURAIN_PASSWORD=mot_de_passe)
-    relais.Endurain(conf)._connexion()  # lève une erreur si Endurain refuse
-    lignes = [l for l in relais.CONFIG.read_text().splitlines()
-              if not l.startswith(("ENDURAIN_USER=", "ENDURAIN_PASSWORD="))] if relais.CONFIG.exists() else []
-    relais.CONFIG.write_text("\n".join(lignes + [f"ENDURAIN_USER={utilisateur}", f"ENDURAIN_PASSWORD={mot_de_passe}"]) + "\n")
-    relais.CONFIG.chmod(0o600)
-    return {"ok": True}
+def synchro_horaire():
+    """Chaque heure, les nouvelles activités de la montre chez Garmin, comme le faisait Endurain. Si une commande tourne, à l'heure suivante."""
+    while prochain_auto() is not None:
+        time.sleep(3600)
+        if relais.JETONS_GARMIN.is_dir() and any(relais.JETONS_GARMIN.iterdir()):
+            TACHE.lancer(["garmin"])
 
 
 def etat():
@@ -123,10 +121,13 @@ def etat():
         proposees = [l for l in bibliotheque if relais.proposee(nom, l)]  # Smashrun : courses avec distance
         # statuts des seules activités proposées (le journal garde aussi d'anciens noms et des activités non proposées)
         statuts = Counter(envois[l["fichier"]].split(" :")[0] for l in proposees if l["fichier"] in envois)
+        # une activité venue de ce service y est déjà (la montre se synchronise avec Garmin) : a_envoyer ne l'envoie jamais
+        origine = relais.ORIGINE_SERVICE.get(nom)
+        deja_la = sum(l["fichier"] not in envois and l["enregistreur"] == origine for l in proposees)
         destinations[nom] = {"configuree": destination_configuree(nom, conf), "envoye": statuts.get("envoye", 0),
-                             "deja": statuts.get("deja", 0), "refuse": statuts.get("refuse", 0), "total": len(proposees),
+                             "deja": statuts.get("deja", 0) + deja_la, "refuse": statuts.get("refuse", 0), "total": len(proposees),
                              # activités de la bibliothèque actuelle jamais traitées (le journal garde aussi d'anciens noms)
-                             "restantes": sum(l["fichier"] not in envois for l in proposees)}
+                             "restantes": sum(l["fichier"] not in envois for l in proposees) - deja_la}
     index = relais.V2 / "index.csv"
     return {
         "bibliotheque": {"total": len(bibliotheque),
@@ -136,10 +137,6 @@ def etat():
                          "convertie_le": datetime.fromtimestamp(index.stat().st_mtime).strftime("%d/%m/%Y à %H:%M") if index.exists() else None},
         "destinations": destinations,
         "montre": str(montre) if montre else None,
-        "endurain": relais.endurain_actif(conf),
-        "endurain_url": ENDURAIN_PUBLIC,
-        "cle_api": bool(conf.get("ENDURAIN_API_KEY")),
-        "endurain_identifiants": bool(conf.get("ENDURAIN_PASSWORD")),
         "prochain_auto": prochain.strftime("%d/%m à %H:%M") if (prochain := prochain_auto()) else None,
         "garmin_connecte": relais.JETONS_GARMIN.is_dir() and any(relais.JETONS_GARMIN.iterdir()),
         "commande": TACHE.commande if TACHE.en_cours() else None,
@@ -156,7 +153,193 @@ def sante():
             return [[l["date"], *(float(l[c]) if l.get(c) else None for c in colonnes)] for l in csv.DictReader(f)]
 
     return {"pas": lire("pas.csv", ["pas"]), "poids": lire("poids.csv", ["kg"]), "sommeil": lire("sommeil.csv", ["total_h"]),
-            "montre": lire("montre.csv", ["pas", "fc_repos", "stress_moy"])}
+            "montre": lire("montre.csv", ["pas", "fc_repos", "stress_moy"]),
+            "garmin": lire("garmin.csv", ["fc_repos", "stress_moy", "batterie_max"]),
+            "jours_minute": sorted({f.stem[-10:] for f in (relais.GARMIN_CONNECT / "minute").glob("*.json")})}
+
+
+def performance():
+    """Statistiques et conseils calculés par relais.py sante, avec la copie de Smashrun."""
+    fichier, smashrun = relais.SANTE / "performance.json", relais.SANTE / "smashrun.json"
+    resultat = json.loads(fichier.read_text()) if fichier.exists() else {}
+    if resultat and smashrun.exists():
+        copie = json.loads(smashrun.read_text())
+        resultat["smashrun"] = {c: copie[c] for c in ("stats", "annee", "badges")}
+    return resultat
+
+
+def journee(jour):
+    """Détail d'une journée copiée de Garmin Connect ; rien si la journée n'est pas copiée."""
+    try:
+        fichiers = [relais.GARMIN_CONNECT / "minute" / f"garmin-connect-{nom}-{date.fromisoformat(jour)}.json" for nom in ("minute", "nuit")]
+    except ValueError:
+        return {}
+    return {cle: valeur for f in fichiers if f.exists() for cle, valeur in json.loads(f.read_text()).items()}
+
+
+def activites():
+    """La bibliothèque (activites-v2/index.csv) pour la section Activités, la plus récente d'abord."""
+    index = relais.V2 / "index.csv"
+    if not index.exists():
+        return []
+    colonnes = ("fichier", "categorie", "debut_utc", "duree_min", "distance_km", "vitesse_kmh", "gps", "source", "remarques")
+    noms = activites_montre()
+    with index.open() as f:
+        lignes = [{**{c: l[c] for c in colonnes}, "nom_garmin": noms.get(l["debut_utc"][:19], {}).get("activityName"),
+                   "type_garmin": noms.get(l["debut_utc"][:19], {}).get("typeKey")} for l in csv.DictReader(f)]
+    return sorted(lignes, key=lambda l: l["debut_utc"], reverse=True)
+
+
+def activites_montre():
+    """Les activités de la montre chez Garmin, par heure de départ UTC (AAAA-MM-JJTHH:MM:SS)."""
+    resultat = {}
+    for fichier in relais.GARMIN_CONNECT.glob("garmin-connect-liste-*.json"):
+        for a in json.loads(fichier.read_text())["valeurs"]:
+            if a.get("startTimeGMT") and a.get("manufacturer") == "GARMIN":
+                resultat[a["startTimeGMT"].replace(" ", "T")[:19]] = a
+    return resultat
+
+
+def compte_garmin():
+    """La copie du compte, sans les records tirés d'imports : pour Garmin, un total journalier de 2014 est une course de 106 km.
+    Un record lié à une activité ne compte que si la montre l'a mesurée ; ceux des pas n'ont pas d'activité."""
+    fichier = relais.GARMIN_CONNECT / "compte.json"
+    if not fichier.exists():
+        return {}
+    compte = json.loads(fichier.read_text())
+    montre = {a["activityId"] for a in activites_montre().values()}
+    compte["records"] = [r for r in compte.get("records") or [] if not r.get("activityId") or r["activityId"] in montre]
+    return compte
+
+
+NOMS_EXERCICES = {"UNKNOWN": "Non reconnu par la montre", "SIT_UP": "Abdominaux", "CRUNCH": "Abdominaux", "PUSH_UP": "Pompes", "CARDIO": "Cardio", "LATERAL_RAISE": "Élévations latérales",
+                  "TRICEPS_EXTENSION": "Triceps", "ROW": "Tirage", "SQUAT": "Squats", "DEADLIFT": "Soulevé de terre", "BENCH_PRESS": "Développé couché", "WARM_UP": "Échauffement",
+                  "HYPEREXTENSION": "Lombaires", "PLANK": "Gainage", "LUNGE": "Fentes", "CURL": "Curl", "PULL_UP": "Tractions", "SHOULDER_PRESS": "Développé épaules"}
+
+
+def details_sports():
+    """Ce qui n'existe que pour certains sports, lu dans les données d'origine de la montre : les exercices de musculation
+    (garmin-connect/exercices/) et les longueurs de natation (leurs FIT d'origine ; la bibliothèque n'en garde pas le détail)."""
+    from garmin_fit_sdk import Decoder, Stream
+
+    par_exercice, seances_muscu = {}, []
+    for fichier in (relais.GARMIN_CONNECT / "exercices").glob("*.json"):
+        actives = [s for s in json.loads(fichier.read_text()).get("exerciseSets") or [] if s.get("setType") == "ACTIVE"]
+        for s in actives:
+            categorie = ((s.get("exercises") or [{}])[0].get("category")) or "UNKNOWN"
+            e = par_exercice.setdefault(categorie, {"nom": NOMS_EXERCICES.get(categorie, categorie.replace("_", " ").capitalize()), "series": 0, "repetitions": 0, "poids_max": None})
+            e["series"] += 1
+            e["repetitions"] += s.get("repetitionCount") or 0
+            if s.get("weight"):
+                e["poids_max"] = max(e["poids_max"] or 0, s["weight"] / 1000)
+        if actives:
+            seances_muscu.append({"jour": min(s["startTime"] for s in actives if s.get("startTime"))[:10], "series": len(actives),
+                                  "repetitions": sum(s.get("repetitionCount") or 0 for s in actives),
+                                  "volume": round(sum((s.get("weight") or 0) / 1000 * (s.get("repetitionCount") or 0) for s in actives))})
+    natation = []
+    for a in activites_montre().values():
+        fit = relais.ARCHIVE / "Activity" / "garmin-connect" / f"{a['activityId']}.fit"
+        if a.get("typeKey") in ("lap_swimming", "open_water_swimming") and fit.exists():
+            messages, _ = Decoder(Stream.from_file(str(fit))).read()
+            s = (messages.get("session_mesgs") or [{}])[0]
+            natation.append({"jour": a["startTimeGMT"][:10], "metres": s.get("total_distance"), "secondes": s.get("total_timer_time"), "longueurs": s.get("num_active_lengths"),
+                             "bassin": s.get("pool_length"), "mouvements": s.get("total_strokes"), "swolf": s.get("avg_swolf"), "eau_libre": a["typeKey"] == "open_water_swimming"})
+    return {"exercices": sorted(par_exercice.values(), key=lambda e: -e["series"]), "musculation": sorted(seances_muscu, key=lambda s: s["jour"]),
+            "natation": sorted(natation, key=lambda n: n["jour"], reverse=True)}
+
+
+def medias(debut_utc):
+    dossier = carnet.dossier_medias(relais.SANTE, debut_utc)
+    return sorted(f.name for f in dossier.iterdir()) if dossier.is_dir() else []
+
+
+def recevoir(dossier, nom, types, donnees):
+    """Enregistre un fichier envoyé par la page, sans jamais en écraser un autre."""
+    if len(donnees) > TAILLE_ENVOI:
+        raise ValueError("fichier trop gros (50 Mo au plus)")
+    dossier.mkdir(parents=True, exist_ok=True)
+    cible = dossier / carnet.nom_sur(nom, types)
+    while cible.exists():
+        cible = cible.with_stem(cible.stem + "-2")
+    cible.write_bytes(donnees)
+    return {"ok": True, "nom": cible.name}
+
+
+def fit_bibliotheque(fichier):
+    """Chemin d'un FIT de la bibliothèque, ou None : aucun autre fichier n'est lu."""
+    chemin = (relais.V2 / urllib.parse.unquote(fichier)).resolve()
+    return chemin if chemin.suffix == ".fit" and chemin.is_relative_to(relais.V2.resolve()) and chemin.is_file() else None
+
+
+def meteo_smashrun(depart):
+    """La météo que Smashrun associe à une course partie à cette heure, à 2 min près."""
+    fichier = relais.SANTE / "smashrun.json"
+    if not fichier.exists():
+        return None
+    moment = datetime.fromisoformat(depart)
+    return next((c for c in json.loads(fichier.read_text())["courses"] if c.get("temperature") is not None
+                 and abs((datetime.fromisoformat(c["startDateTimeLocal"]) - moment).total_seconds()) <= 120), None)
+
+
+FENETRES = ((36500, "de tout votre historique"), (365, "en un an"), (90, "en 3 mois"), (30, "en un mois"))
+
+
+def vitesse(s):
+    """km/h en mouvement : c'est la vraie allure, les arrêts n'y comptent pas."""
+    return 60 * s["km"] / (s["mouvement"] or s["minutes"] or 1)
+
+
+def reperes(fichier):
+    """Où se place une activité parmi celles de sa catégorie : rangs, ce qu'elle a de remarquable à sa date, et les plus
+    rapides sur une distance voisine (±10 %). La vitesse ne compare que des séances de montre : voir performance.py."""
+    fichier_perf = relais.SANTE / "performance.json"
+    if not fichier_perf.exists():
+        return {}
+    perf = json.loads(fichier_perf.read_text())
+    s = next((x for x in perf.get("seances", []) if x["fichier"] == fichier), None)
+    if not s:
+        return {}
+    resultat = {"zones": s["zones"], "fc_max": perf["fc_max"], "charge": s["charge"], "notables": [], "rangs": [], "semblables": []}
+    groupe = [x for x in perf["seances"] if x["categorie"] == s["categorie"]]
+    avec_km = [x for x in groupe if x["km"] and x["gps"]]
+    if not s["km"] or not s["gps"]:
+        return resultat
+    semblables = sorted((x for x in avec_km if x["montre"] and .9 * s["km"] <= x["km"] <= 1.1 * s["km"]), key=vitesse, reverse=True)
+    resultat["rangs"].append({"nom": "Par la distance", "rang": 1 + sum(x["km"] > s["km"] for x in avec_km), "sur": len(avec_km)})
+    if s in semblables:
+        resultat["rangs"].append({"nom": f"Par la vitesse, sur {round(s['km'])} km environ", "rang": semblables.index(s) + 1, "sur": len(semblables)})
+    resultat["semblables"] = [{"fichier": x["fichier"], "jour": x["jour"], "km": x["km"], "kmh": round(vitesse(x), 2)} for x in semblables[:10]]
+
+    def remarquable(valeur, texte, candidates):
+        """La plus longue période sur laquelle cette séance bat toutes les précédentes (à sa date, pas à aujourd'hui)."""
+        jour = date.fromisoformat(s["jour"])
+        for jours, periode in FENETRES:
+            avant = [x for x in candidates if x is not s and valeur(x) is not None and 0 <= (jour - date.fromisoformat(x["jour"])).days <= jours]
+            if len(avant) >= 3 and valeur(s) is not None and all(valeur(s) > valeur(x) for x in avant):
+                resultat["notables"].append(f"{texte} {periode}")
+                return
+
+    remarquable(lambda x: x["km"], "Sortie la plus longue", avec_km)
+    remarquable(vitesse, f"{round(s['km'])} km le plus rapide", [x for x in semblables if x["jour"] <= s["jour"]] if s["montre"] else [])
+    remarquable(lambda x: x["fc"], "FC moyenne la plus haute", avec_km)
+    remarquable(lambda x: x["montee"], "Le plus de dénivelé", avec_km)
+    remarquable(lambda x: x["charge"], "Séance la plus chargée", groupe)
+    return resultat
+
+
+def activite(fichier):
+    import fitconv
+
+    chemin = fit_bibliotheque(fichier)
+    if not chemin:
+        return {}
+    detail = fitconv.lire_detail(chemin)
+    if detail:
+        detail["meteo"] = meteo_smashrun(detail["depart"])
+        detail["reperes"] = reperes(urllib.parse.unquote(fichier))
+        exercices = relais.GARMIN_CONNECT / "exercices" / f"{activites_montre().get(detail['depart'][:19], {}).get('activityId')}.json"
+        detail["exercices"] = json.loads(exercices.read_text()) if exercices.exists() else None
+    return detail
 
 
 def destination_configuree(nom, conf):
@@ -165,7 +348,7 @@ def destination_configuree(nom, conf):
     if nom == "strava":
         return bool(conf.get("STRAVA_CLIENT_ID")) and relais.JETONS_STRAVA.exists()
     return bool(conf.get({"intervals": "INTERVALS_API_KEY", "runalyze": "RUNALYZE_TOKEN",
-                          "endurain": "ENDURAIN_API_KEY", "smashrun": "SMASHRUN_TOKEN"}[nom]))
+                          "smashrun": "SMASHRUN_TOKEN"}[nom]))
 
 
 def configurer_destination(nom, champs):
@@ -216,7 +399,7 @@ def code_mfa(code):
 def arguments(demande):
     """Traduit un bouton de l'interface en arguments de relais.py (rien d'autre n'est accepté)."""
     commande = demande.get("commande")
-    if commande in ("montre", "etat", "sante", "auto", "preparer", "satellites"):
+    if commande in ("montre", "etat", "sante", "auto", "preparer", "satellites", "garmin", "collecte"):
         return [commande]
     if commande == "convertir":
         chemin = (demande.get("chemin") or "").strip()
@@ -253,6 +436,38 @@ class Gestionnaire(BaseHTTPRequestHandler):
             self._repondre(200, etat())
         elif self.path == "/api/sante":
             self._repondre(200, sante())
+        elif self.path == "/manifest.webmanifest":
+            self._repondre(200, (APPLI / "manifest.webmanifest").read_bytes(), "application/manifest+json")
+        elif self.path in ("/icone-192.png", "/icone-512.png"):
+            self._repondre(200, (APPLI / self.path[1:]).read_bytes(), "image/png")
+        elif self.path in ("/leaflet.js", "/leaflet.css"):
+            self._repondre(200, (LEAFLET / self.path[1:]).read_bytes(), "text/css" if self.path.endswith("css") else "text/javascript")
+        elif self.path.startswith("/api/fit?"):
+            chemin = fit_bibliotheque(self.path.partition("fichier=")[2])
+            self._repondre(200, chemin.read_bytes(), "application/octet-stream") if chemin else self._repondre(404, {"erreur": "introuvable"})
+        elif self.path == "/api/performance":
+            self._repondre(200, performance())
+        elif self.path == "/api/details-sports":
+            self._repondre(200, details_sports())
+        elif self.path == "/api/carnet":
+            self._repondre(200, carnet.lire(relais.SANTE))
+        elif self.path == "/api/compte":
+            self._repondre(200, compte_garmin())
+        elif self.path.startswith("/api/medias?"):
+            self._repondre(200, medias(urllib.parse.unquote(self.path.partition("debut=")[2])))
+        elif self.path.startswith("/media?"):
+            q = urllib.parse.parse_qs(self.path.partition("?")[2])
+            try:
+                fichier = carnet.dossier_medias(relais.SANTE, q["debut"][0]) / carnet.nom_sur(q["nom"][0], carnet.TYPES_MEDIA)
+                self._repondre(200, fichier.read_bytes(), "image/" + fichier.suffix[1:].replace("jpg", "jpeg").lower())
+            except (KeyError, ValueError, OSError):
+                self._repondre(404, {"erreur": "introuvable"})
+        elif self.path == "/api/activites":
+            self._repondre(200, activites())
+        elif self.path.startswith("/api/activite?"):
+            self._repondre(200, activite(self.path.partition("fichier=")[2]))
+        elif self.path.startswith("/api/journee"):
+            self._repondre(200, journee(self.path.partition("date=")[2]))
         elif self.path == "/strava/autoriser":
             import destinations
 
@@ -287,8 +502,21 @@ class Gestionnaire(BaseHTTPRequestHandler):
             self._repondre(404, {"erreur": "introuvable"})
 
     def do_POST(self):
+        # une page d'un autre site ouverte dans le même navigateur ne doit pas pouvoir lancer de commande
+        origine = self.headers.get("Origin")
+        if origine and urllib.parse.urlsplit(origine).netloc != self.headers.get("Host"):
+            return self._repondre(403, {"erreur": "origine refusée"})
         try:
-            demande = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+            taille = int(self.headers.get("Content-Length", 0))
+            q = urllib.parse.parse_qs(self.path.partition("?")[2])
+            if self.path.startswith("/api/envoi-activite?") or self.path.startswith("/api/envoi-media?"):  # fichier brut, dans le corps
+                if taille > TAILLE_ENVOI:
+                    return self._repondre(400, {"erreur": "fichier trop gros (50 Mo au plus)"})
+                donnees = self.rfile.read(taille)
+                if self.path.startswith("/api/envoi-activite?"):
+                    return self._repondre(200, recevoir(relais.chemin("sources-brutes") / "imports", q["nom"][0], carnet.TYPES_IMPORT, donnees))
+                return self._repondre(200, recevoir(carnet.dossier_medias(relais.SANTE, q["debut"][0]), q["nom"][0], carnet.TYPES_MEDIA, donnees))
+            demande = json.loads(self.rfile.read(taille) or "{}")
             if self.path == "/api/lancer":
                 if not TACHE.lancer(arguments(demande)):
                     return self._repondre(409, {"erreur": "une commande est déjà en cours"})
@@ -300,10 +528,13 @@ class Gestionnaire(BaseHTTPRequestHandler):
                 self._repondre(200, connexion_garmin(demande["email"], demande["mot_de_passe"]))
             elif self.path == "/api/garmin/mfa":
                 self._repondre(200, code_mfa(demande["code"]))
+            elif self.path == "/api/carnet":
+                self._repondre(200, carnet.modifier(relais.SANTE, demande["section"], demande.get("cle"), demande.get("valeur")))
+            elif self.path == "/api/retirer-media":
+                (carnet.dossier_medias(relais.SANTE, demande["debut"]) / carnet.nom_sur(demande["nom"], carnet.TYPES_MEDIA)).unlink(missing_ok=True)
+                self._repondre(200, {"ok": True})
             elif self.path == "/api/destination":
                 self._repondre(200, configurer_destination(demande["nom"], demande.get("champs") or {}))
-            elif self.path == "/api/endurain/identifiants":
-                self._repondre(200, enregistrer_identifiants_endurain(demande["utilisateur"], demande["mot_de_passe"]))
             else:
                 self._repondre(404, {"erreur": "introuvable"})
         except Exception as e:  # message affiché dans l'interface
@@ -316,4 +547,5 @@ class Gestionnaire(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"Interface relais.py sur le port {PORT} ; mode automatique : {prochain_auto() or 'désactivé'}")
     threading.Thread(target=planificateur, daemon=True).start()
+    threading.Thread(target=synchro_horaire, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Gestionnaire).serve_forever()

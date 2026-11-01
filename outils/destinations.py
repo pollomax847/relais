@@ -8,7 +8,6 @@ de chaque fichier : relancer reprend là où l'on s'était arrêté.
 - strava    : Strava (API officielle ; application Strava + autorisation OAuth, jetons dans ~/.config/sport/strava.json)
 - intervals : intervals.icu (clé d'API personnelle INTERVALS_API_KEY ; refuse lui-même les doublons)
 - runalyze  : Runalyze (jeton « Personal API » RUNALYZE_TOKEN ; chemin d'envoi non publié, vérifié au premier envoi)
-- endurain  : Endurain (clé d'API ENDURAIN_API_KEY, déjà utilisée pour la montre)
 - smashrun  : Smashrun (jeton personnel SMASHRUN_TOKEN, 12 semaines ; course à pied seulement)
 """
 import json
@@ -274,30 +273,4 @@ class Smashrun:
             return "envoye"
         if statut == 401:
             raise NonConfiguree("Smashrun : jeton expiré (12 semaines), en recopier un depuis api.smashrun.com/v1/explorer")
-        return f"refuse : {statut} {str(reponse)[:120]}"
-
-
-# ----------------------------------------------------------------------------- Endurain
-
-class Endurain:
-    nom, titre = "endurain", "Endurain"
-
-    def __init__(self, conf):
-        self.url, self.cle = conf["ENDURAIN_URL"], conf.get("ENDURAIN_API_KEY")
-        if not self.cle:
-            raise NonConfiguree("clé d'API Endurain absente")
-
-    def verifier(self):
-        statut, _ = _requete(f"{self.url}/api/v1/about")
-        if statut != 200:
-            raise NonConfiguree("Endurain ne répond pas")
-        return "en marche"
-
-    def envoyer(self, fichier, activite):
-        corps, type_ = _multipart(fichier)
-        statut, reponse = _requete(f"{self.url}/api/v1/activities/upload", "POST", corps,
-                                   {"X-API-Key": self.cle, "Content-Type": type_,
-                                    "Idempotency-Key": f"v2-{activite['fichier']}"})
-        if statut in (200, 201, 202):
-            return "envoye"  # Endurain écarte lui-même les doublons à l'import
         return f"refuse : {statut} {str(reponse)[:120]}"

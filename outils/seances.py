@@ -372,9 +372,11 @@ def lire_trace_generique(fichier, source, enregistreur, original, decalage_local
                              r.get("cadence")) for r in records if r.get("timestamp")]
         sport, sous, sur = _sport_libelle(str(sport_force or se.get("sport") or ""))
         sous = str(se.get("sub_sport") or sous) if sur else sous
+        if enregistreur == "Garmin" and se.get("sport") in ("training", "fitness_equipment"):
+            sport, sous, sur = se["sport"], str(se.get("sub_sport")), True  # choisi sur la montre, sans vitesse pour le déduire
         s = Seance(source, enregistreur, original, debut.astimezone(UTC), duree, se.get("total_distance") or None,
                    sport, sous if sous in ("treadmill", "trail", "indoor_cycling", "mountain", "road", "strength_training",
-                                       "lap_swimming", "open_water") else "generic",
+                                       "lap_swimming", "open_water", "cardio_training", "yoga", "elliptical") else "generic",
                    sur, calories=se.get("total_calories"), fc_moy=se.get("avg_heart_rate"), fc_max=se.get("max_heart_rate"),
                    chemin=str(fichier), _points=lambda pts=pts: pts)
         yield _decrire(s, pts)
@@ -591,6 +593,8 @@ def reconnaitre(fichier):
         if ext == ".json" and parent == "activities":
             return lire_runalyze_json(fichier, None)
         return None
+    if parent == "imports":  # ajouté à la main ou récupéré de Garmin : passe les mêmes filtres qu'une séance d'appli
+        return lire_trace_generique(fichier, "Import", "inconnu", False)
     if "smashrun" in nom.lower() or "smachrun" in chemin.lower():
         # heure juste dans 73 % des cas (vérifié contre les traces GPS), décalée de +1/+2 h pour certaines séances
         # reçues d'autres applis : « à vérifier », corrigée par un exemplaire sûr s'il existe

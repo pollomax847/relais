@@ -479,36 +479,22 @@ def _vraies_pesees(pesees):
     return resultat
 
 
-# --- formats d'envoi vers Endurain (API /health/…)
-
-def json_pas(jour, n):
-    return {"date": jour.isoformat(), "steps": n}
-
-
-def json_poids(p):
-    corps = {"date": p.jour.isoformat(), "weight": round(p.kg, 2)}
-    for cle, valeur in (("body_fat", p.graisse), ("muscle_mass", p.muscle), ("bone_mass", p.os),
-                        ("body_water", p.eau), ("bmi", p.imc)):
-        if valeur is not None and 0 < valeur < 100:
-            corps[cle] = round(float(valeur), 2)
-    return corps
-
-
-def json_sommeil(s):
-    corps = {"date": s.jour.isoformat(), "total_sleep_seconds": s.total}
-    if s.debut and s.fin:
-        corps.update(sleep_start_time_gmt=s.debut.replace(tzinfo=None).isoformat(),
-                     sleep_end_time_gmt=s.fin.replace(tzinfo=None).isoformat(),
-                     sleep_start_time_local=(s.debut + s.decalage).replace(tzinfo=None).isoformat(),
-                     sleep_end_time_local=(s.fin + s.decalage).replace(tzinfo=None).isoformat())
-    for cle, valeur in (("deep_sleep_seconds", s.profond), ("light_sleep_seconds", s.leger), ("rem_sleep_seconds", s.rem),
-                        ("awake_sleep_seconds", s.eveil), ("awake_count", s.reveils)):
-        if valeur is not None:
-            corps[cle] = int(valeur)
-    for cle, valeur in (("avg_heart_rate", s.fc_moy), ("min_heart_rate", s.fc_min), ("max_heart_rate", s.fc_max)):
-        if valeur and 20 <= valeur <= 220:
-            corps[cle] = int(valeur)
-    return corps
+def ecrire_journees_garmin(source, dossier):
+    """sante/garmin.csv : une ligne par jour, depuis les résumés copiés de Garmin Connect (garmin-connect-jour-*.json).
+    Garmin note par une valeur négative ce qu'il n'a pas pu mesurer : la case reste vide."""
+    colonnes = {"fc_repos": ("heartRate", "restingValue"), "fc_min": ("heartRate", "minValue"), "fc_max": ("heartRate", "maxValue"),
+                "stress_moy": ("stress", "avgLevel"), "stress_max": ("stress", "maxLevel"),
+                "batterie_min": ("bodyBattery", "minValue"), "batterie_max": ("bodyBattery", "maxValue"),
+                "batterie_chargee": ("bodyBattery", "chargedValue"), "batterie_depensee": ("bodyBattery", "drainedValue"),
+                "minutes_moderees": ("intensityMinutes", "moderate"), "minutes_intenses": ("intensityMinutes", "vigorous"),
+                "calories_actives": ("calories", "burnedActive"), "calories_total": ("calories", "burnedTotal")}
+    with (dossier / "garmin.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["date", *colonnes])
+        for fichier in sorted(source.glob("garmin-connect-jour-*.json")):
+            for j in json.loads(fichier.read_text())["valeurs"]:
+                valeurs = [(j.get(partie) or {}).get(cle) for partie, cle in colonnes.values()]
+                w.writerow([j["calendarDate"], *("" if v is None or v < 0 else v for v in valeurs)])
 
 
 def ecrire_csv(dossier, pas, poids, sommeil, montre):
