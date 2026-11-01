@@ -56,6 +56,24 @@ Une seule commande longue tourne à la fois, que ce soit dans le terminal ou l'i
 
 Pour les nouvelles activités, Tapiriik (lien en haut de l'interface) peut synchroniser les services entre eux.
 
+## Sur le téléphone
+Relais reste sur l'ordinateur ; le téléphone l'ouvre à travers Tailscale, sans rien exposer sur Internet. Une seule fois, sur l'ordinateur :
+```bash
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090
+```
+Sur le téléphone, avec Tailscale activé, ouvrez `https://<nom de l'ordinateur>.<votre réseau>.ts.net:8443` dans Chrome, puis « Ajouter à l'écran d'accueil ». N'utilisez pas `tailscale funnel` : Relais n'a pas à être public. L'ordinateur doit être allumé.
+
+À la maison, Tailscale n'est pas nécessaire. Choisissez d'abord le mot de passe, ajoutez `RELAIS_ECOUTE=0.0.0.0` dans `endurain/.env`, puis lancez `docker compose up -d relais` dans `endurain/`.
+
+Chrome n'installe une application que sur une adresse qu'il juge sûre. Sur le téléphone, connecté au même Wi-Fi :
+1. Dans Chrome, ouvrez `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
+2. Dans la case, écrivez `http://<adresse de l'ordinateur>:8090`, choisissez « Enabled » et relancez Chrome.
+3. Ouvrez cette adresse, connectez-vous, puis choisissez « Installer l'application » dans le menu ⋮ de Chrome.
+
+Cette connexion n'est pas chiffrée : gardez-la pour un réseau de confiance.
+
+Le mot de passe se choisit dans Réglages. Il est demandé sur chaque appareil, une fois par mois. Seule son empreinte est gardée, dans `~/.config/sport/acces.json`. En cas d'oubli : `outils/relais.py mot-de-passe`, dans un terminal (`--retirer` pour s'en passer).
+
 ## Destinations
 | Service | Ce qu'il faut | Remarques |
 |---|---|---|

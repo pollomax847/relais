@@ -18,6 +18,8 @@
                          parcours et entraînements de Garmin Connect pour la montre (sans nom : la liste)
   relais.py garmin       récupère chez Garmin les nouvelles activités de la montre, puis refait la bibliothèque
   relais.py collecte [AAAA-MM-JJ [AAAA-MM-JJ]]  le code de garmin-grafana (garmin_grafana/), base locale : les 3 derniers jours, ou la période
+  relais.py mot-de-passe [--retirer]  choisit le mot de passe de l'interface, par exemple après un oubli
+  relais.py certificat <adresse de l'ordinateur> [--refaire]  chiffre l'accès depuis le réseau de la maison
   relais.py auto         tout en une fois : montre, conversion, santé, envois choisis (SPORT_AUTO_DESTINATIONS)
   relais.py refaire garmin   retire de Garmin ce que l'ancienne version y a envoyé (avant d'envoyer activites-v2)
   relais.py satellites   met à jour les données satellites (EPO) de la montre branchée, pour un GPS plus rapide
@@ -1009,6 +1011,38 @@ def cmd_reconvertir():
     ecrire_performance()
 
 
+def cmd_mot_de_passe():
+    import acces
+
+    if "--retirer" in sys.argv:
+        acces.retirer()
+        print("Mot de passe retiré : l'interface est ouverte sans connexion.")
+        return
+    mot = getpass.getpass("Nouveau mot de passe : ")
+    if mot != getpass.getpass("Encore une fois : "):
+        sys.exit("Les deux saisies sont différentes : rien n'a changé.")
+    try:
+        acces.definir(mot)
+    except ValueError as e:
+        sys.exit(str(e))
+    print("Mot de passe enregistré. Tous les appareils doivent se reconnecter.")
+
+
+def cmd_certificat():
+    import acces
+
+    if len(sys.argv) < 3:
+        sys.exit("Indiquez l'adresse de l'ordinateur sur le réseau : relais.py certificat 192.168.1.10")
+    if (acces.CERTIFICATS / "relais.crt").exists() and "--refaire" not in sys.argv:
+        print("Le certificat existe déjà. --refaire le remplace : il faudra le réinstaller sur le téléphone.")
+        return
+    try:
+        acces.creer_certificat(sys.argv[2])
+    except ValueError as e:
+        sys.exit(str(e))
+    print("Certificat créé : redémarrez relais pour l'utiliser.")
+
+
 def cmd_garmin():
     """Récupère les nouvelles activités de la montre chez Garmin et, s'il y en a, refait la bibliothèque."""
     utiliser_venv()
@@ -1344,6 +1378,8 @@ def main():
         "auto": cmd_auto,
         "garmin": cmd_garmin,
         "collecte": cmd_collecte,
+        "mot-de-passe": cmd_mot_de_passe,
+        "certificat": cmd_certificat,
         "refaire": cmd_refaire,
         "retirer": cmd_retirer,
         "preparer": cmd_reconvertir,

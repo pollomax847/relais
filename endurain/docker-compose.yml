@@ -23,5 +23,6 @@ services:
         bind:
           propagation: rslave
     ports:
-      - "127.0.0.1:8090:8090"
+      - "${RELAIS_ECOUTE:-127.0.0.1}:8090:8090"  # 0.0.0.0 dans .env : aussi pour les appareils du réseau de la maison
+      - "${RELAIS_ECOUTE:-127.0.0.1}:8091:8091"  # https, après relais.py certificat
     restart: unless-stopped

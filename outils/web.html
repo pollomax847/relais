@@ -494,7 +494,7 @@
     <div class="entete-vue"><h1>Comprendre Relais</h1></div>
     <nav class="sommaire" aria-label="Sommaire">
       <a href="#aide/ecrans">Les écrans</a><a href="#aide/donnees">Vos données</a><a href="#aide/forme">La forme du jour</a><a href="#aide/cardio">Capacité et niveau</a>
-      <a href="#aide/intensite">L'intensité</a><a href="#aide/repères">Allures et temps</a><a href="#aide/conseils">Les conseils</a><a href="#aide/auto">Ce qui se fait tout seul</a><a href="#aide/questions">Questions</a>
+      <a href="#aide/intensite">L'intensité</a><a href="#aide/repères">Allures et temps</a><a href="#aide/conseils">Les conseils</a><a href="#aide/auto">Ce qui se fait tout seul</a><a href="#aide/telephone">Sur le téléphone</a><a href="#aide/questions">Questions</a>
     </nav>
 
     <section class="carte page-aide" id="aide-ecrans">
@@ -588,6 +588,20 @@
       <p>Pour ne rien attendre, utilisez « Tout faire » dans les <a href="#reglages">Réglages</a>.</p>
     </section>
 
+    <section class="carte page-aide espace" id="aide-telephone">
+      <h2>Sur le téléphone</h2>
+      <p>Relais tourne sur votre ordinateur : le téléphone ouvre le même Relais, avec exactement les mêmes informations, et ce que vous y notez apparaît aussi sur l'ordinateur.</p>
+      <p>Pour l'installer comme une application, sur le même Wi-Fi que l'ordinateur (une seule fois) :</p>
+      <ol>
+        <li>Dans Chrome, ouvrez chrome://flags/#unsafely-treat-insecure-origin-as-secure.</li>
+        <li>Dans la case, écrivez http:// suivi de l'adresse de l'ordinateur et de :8090. Choisissez « Enabled », puis relancez Chrome.</li>
+        <li>Ouvrez cette adresse et connectez-vous.</li>
+        <li>Dans le menu ⋮ de Chrome, choisissez « Installer l'application ».</li>
+      </ol>
+      <p>Cette adresse n'est pas chiffrée : gardez-la pour le Wi-Fi de la maison.</p>
+      <p>L'ordinateur doit être allumé. Votre mot de passe est toujours demandé, et Relais n'est pas visible sur Internet.</p>
+    </section>
+
     <section class="carte page-aide espace" id="aide-questions">
       <h2>Questions</h2>
       <dl class="lexique">
@@ -624,6 +638,18 @@
     <div class="titre-section entete-carte"><span>Envoyer vers les services</span>
       <a class="lien-discret" href="https://tapiriik.com" target="_blank" rel="noopener" title="Synchronise automatiquement les nouvelles activités entre services (Garmin, Strava, Runalyze…)">Tapiriik ↗</a></div>
     <div class="grille" id="destinations"></div>
+
+    <div class="titre-section">Mot de passe</div>
+    <section class="carte">
+      <div class="entete-carte"><h2>Accès à Relais</h2><span class="etiquette" id="e-acces"></span></div>
+      <p class="aide" id="acces-aide"></p>
+      <form id="form-acces" class="formulaire">
+        <label id="acces-actuel">Mot de passe actuel<input name="actuel" type="password" autocomplete="current-password"></label>
+        <label>Nouveau mot de passe<input name="nouveau" type="password" autocomplete="new-password" minlength="8" required></label>
+        <label>Encore une fois<input name="confirmation" type="password" autocomplete="new-password" minlength="8" required></label>
+        <div class="pleine rangee"><button type="submit">Enregistrer</button><button type="button" class="second" id="deconnexion">Se déconnecter</button><span class="aide" id="acces-message" role="status"></span></div>
+      </form>
+    </section>
 
     <div class="titre-section">Compte Garmin</div>
     <section class="carte">
@@ -711,6 +737,7 @@ let lues = 0, commandeAffichee = null, enCours = false, commandeEnCours = "";
 async function api(chemin, donnees) {
   const r = await fetch(chemin, donnees === undefined ? {} :
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(donnees) });
+  if (r.status === 401) { location.replace(`/connexion${location.hash}`); throw new Error("connexion nécessaire"); }
   const corps = await r.json();
   if (!r.ok) throw new Error(corps.erreur || r.statusText);
   return corps;
@@ -811,6 +838,9 @@ async function rafraichirEtat() {
     $("c-conversion").textContent = b.convertie_le || "–";
     for (const [nom, d] of Object.entries(e.destinations)) majDestination(nom, d);
     compte("garmin", e.garmin_connecte, "Changer de compte", "Se connecter");
+    etiquette($("e-acces"), e.mot_de_passe ? "ok" : "attente", e.mot_de_passe ? "activé" : "à choisir");
+    $("acces-aide").textContent = e.mot_de_passe ? "Demandé sur chaque appareil, une fois par mois. En cas d'oubli : outils/relais.py mot-de-passe, dans un terminal." : "Choisissez un mot de passe d'au moins 8 caractères : il sera demandé sur le téléphone comme sur l'ordinateur.";
+    $("acces-actuel").hidden = !e.mot_de_passe; $("deconnexion").hidden = !e.mot_de_passe;
   } catch (err) { /* serveur en redémarrage */ }
 }
 
@@ -1903,6 +1933,16 @@ for (const id of ["f-categorie", "f-annee", "f-texte", "f-masquees"]) $(id).addE
 $("plus-cartes").addEventListener("click", () => { CARTES.visibles += 6; afficherCartes().catch(() => {}); });
 $("plus-activites").addEventListener("click", () => { ACTIVITES.visibles += 50; afficherActivites(); });
 document.querySelectorAll("#mode-activites button").forEach((b) => b.addEventListener("click", () => changerMode(b.dataset.mode)));
+$("form-acces").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target.elements, sortie = $("acces-message");
+  if (f.nouveau.value !== f.confirmation.value) { sortie.textContent = "Les deux saisies sont différentes."; return; }
+  try {
+    await api("/api/mot-de-passe", { actuel: f.actuel.value, nouveau: f.nouveau.value });
+    ev.target.reset(); sortie.textContent = "Mot de passe enregistré."; rafraichirEtat();
+  } catch (err) { sortie.textContent = err.message; }
+});
+$("deconnexion").addEventListener("click", async () => { await api("/api/deconnexion", {}); location.replace("/connexion"); });
 $("form-activite").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const l = ACTIVITES.ligne, champs = Object.fromEntries(new FormData(ev.target));

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connexion · Relais</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icone-192.png">
+<meta name="theme-color" content="#0a66c2">
+<style>
+  :root { --fond: #f3f5f8; --carte: #ffffff; --texte: #16202a; --doux: #5d6b78; --bord: #e1e6ec; --accent: #0a66c2; --ko: #b42318; }
+  @media (prefers-color-scheme: dark) { :root { --fond: #0f1418; --carte: #171e24; --texte: #e3e9ef; --doux: #95a3b0; --bord: #263039; --accent: #5aa2ec; --ko: #f07167; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--fond); color: var(--texte); }
+  form { width: 100%; max-width: 340px; background: var(--carte); border: 1px solid var(--bord); border-radius: 12px; padding: 24px; }
+  h1 { margin: 0 0 16px; font-size: 22px; }
+  label { display: block; font-size: 13px; color: var(--doux); margin-bottom: 4px; }
+  input { width: 100%; padding: 10px; border: 1px solid var(--bord); border-radius: 8px; background: var(--fond); color: var(--texte); font: inherit; }
+  button { width: 100%; margin-top: 14px; padding: 10px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 500; cursor: pointer; }
+  p { min-height: 20px; margin: 10px 0 0; color: var(--ko); font-size: 14px; }
+</style>
+</head>
+<body>
+<form id="connexion">
+  <h1>Relais</h1>
+  <input type="text" name="utilisateur" value="relais" autocomplete="username" hidden>
+  <label for="mot">Mot de passe</label>
+  <input id="mot" type="password" autocomplete="current-password" required autofocus>
+  <button type="submit">Se connecter</button>
+  <p id="erreur" role="alert"></p>
+</form>
+<script>
+document.getElementById("connexion").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const champ = document.getElementById("mot"), erreur = document.getElementById("erreur");
+  erreur.textContent = "";
+  try {
+    const r = await fetch("/api/connexion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mot_de_passe: champ.value }) });
+    if (r.ok) { location.replace("/" + location.hash); return; }
+    erreur.textContent = (await r.json()).erreur || "connexion refusée";
+  } catch (err) { erreur.textContent = "Relais ne répond pas."; }
+  champ.value = ""; champ.focus();
+});
+</script>
+</body>
+</html>

@@ -7,29 +7,40 @@ Chaque bouton lance une commande relais.py et affiche sa sortie en direct. La co
 
 Mode automatique : « relais.py auto » est lancé chaque jour à SPORT_AUTO_HEURE (« 04:00 » par défaut,
 « non » pour le désactiver), si aucune autre commande ne tourne ; « relais.py garmin » l'est chaque heure. Port : SPORT_WEB_PORT (8090 par défaut).
+
+Après relais.py certificat, le port suivant sert la même interface en https, et les appareils du réseau y sont renvoyés.
 """
 import csv
 import json
 import urllib.parse
 import os
+import ssl
 import subprocess
 import sys
 import threading
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import acces
 import carnet
 import relais
 
 RELAIS_PY = Path(__file__).resolve().parent / "relais.py"
 PAGE = Path(__file__).resolve().parent / "web.html"
+CONNEXION = Path(__file__).resolve().parent / "connexion.html"
+CERTIFICAT = "/relais-certificat.crt"  # certificat public à installer sur le téléphone
+OUVERTS = ("/connexion", "/manifest.webmanifest", "/icone-192.png", "/icone-512.png", CERTIFICAT)  # accessibles sans être connecté
+COOKIE = "relais"
 LEAFLET = Path(__file__).resolve().parent / "leaflet"  # carte des activités, version 1.9.4 (licence dans ce dossier)
 APPLI = Path(__file__).resolve().parent / "appli"  # icône et manifeste, pour l'installer sur un téléphone
 TAILLE_ENVOI = 50 * 2 ** 20  # octets, pour une photo ou une activité envoyée depuis la page
 PORT = int(os.environ.get("SPORT_WEB_PORT", "8090"))
+PORT_HTTPS = PORT + 1
+HTTPS = (acces.CERTIFICATS / "relais.crt").exists()  # lu une fois au démarrage, comme le serveur qui en dépend
 HEURE_AUTO = os.environ.get("SPORT_AUTO_HEURE", "04:00")
 PUBLIC = os.environ.get("SPORT_PUBLIC_URL", "http://localhost:8090")  # adresse de retour des autorisations
 # Smashrun rend le jeton dans le fragment de l'adresse (#access_token=…), que seul le navigateur voit : cette page le lit
@@ -139,6 +150,7 @@ def etat():
         "montre": str(montre) if montre else None,
         "prochain_auto": prochain.strftime("%d/%m à %H:%M") if (prochain := prochain_auto()) else None,
         "garmin_connecte": relais.JETONS_GARMIN.is_dir() and any(relais.JETONS_GARMIN.iterdir()),
+        "mot_de_passe": acces.actif(),
         "commande": TACHE.commande if TACHE.en_cours() else None,
     }
 
@@ -416,11 +428,14 @@ def arguments(demande):
 
 
 class Gestionnaire(BaseHTTPRequestHandler):
-    def _repondre(self, code, contenu, type_="application/json"):
+    def _repondre(self, code, contenu, type_="application/json", cookie=None):
         corps = contenu if isinstance(contenu, bytes) else json.dumps(contenu).encode()
         self.send_response(code)
         self.send_header("Content-Type", f"{type_}; charset=utf-8")
         self.send_header("Content-Length", str(len(corps)))
+        if cookie is not None:  # chaîne vide : déconnexion
+            securise = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" or self._chiffre() else ""
+            self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Max-Age={acces.DUREE if cookie else 0}; Path=/; HttpOnly; SameSite=Lax{securise}")
         self.end_headers()
         self.wfile.write(corps)
 
@@ -429,8 +444,36 @@ class Gestionnaire(BaseHTTPRequestHandler):
         self.send_header("Location", url)
         self.end_headers()
 
+    def _chiffre(self):
+        return isinstance(self.connection, ssl.SSLSocket)
+
+    def _hote(self):
+        return urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname
+
+    def _en_clair_sur_le_reseau(self):
+        """Ni chiffré ni sur cet ordinateur : Tailscale chiffre de son côté et annonce X-Forwarded-Proto."""
+        return HTTPS and not self._chiffre() and self._hote() not in ("localhost", "127.0.0.1") and not self.headers.get("X-Forwarded-Proto")
+
+    def _connecte(self):
+        if not acces.actif():
+            return True
+        try:
+            morceau = SimpleCookie(self.headers.get("Cookie", "")).get(COOKIE)
+        except CookieError:
+            return False
+        return bool(morceau) and acces.valide(morceau.value)
+
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/?"):
+        chemin = self.path.partition("?")[0]
+        if chemin != CERTIFICAT and self._en_clair_sur_le_reseau():  # le certificat reste accessible avant d'être installé
+            return self._rediriger(f"https://{self._hote()}:{PORT_HTTPS}{self.path}")
+        if chemin not in OUVERTS and not self._connecte():
+            return self._rediriger("/connexion") if chemin == "/" else self._repondre(401, {"erreur": "connexion nécessaire"})
+        if chemin == CERTIFICAT and HTTPS:
+            self._repondre(200, (acces.CERTIFICATS / "autorite.crt").read_bytes(), "application/octet-stream")
+        elif chemin == "/connexion":
+            self._repondre(200, CONNEXION.read_bytes(), "text/html")
+        elif self.path == "/" or self.path.startswith("/?"):
             self._repondre(200, PAGE.read_bytes(), "text/html")
         elif self.path == "/api/etat":
             self._repondre(200, etat())
@@ -504,8 +547,13 @@ class Gestionnaire(BaseHTTPRequestHandler):
     def do_POST(self):
         # une page d'un autre site ouverte dans le même navigateur ne doit pas pouvoir lancer de commande
         origine = self.headers.get("Origin")
-        if origine and urllib.parse.urlsplit(origine).netloc != self.headers.get("Host"):
+        # derrière Tailscale, l'adresse d'origine peut arriver dans X-Forwarded-Host, qu'une page tierce ne peut pas poser sans autorisation
+        if origine and urllib.parse.urlsplit(origine).netloc not in (self.headers.get("Host"), self.headers.get("X-Forwarded-Host")):
             return self._repondre(403, {"erreur": "origine refusée"})
+        if self._en_clair_sur_le_reseau():
+            return self._repondre(403, {"erreur": "utilisez l'adresse en https"})
+        if self.path != "/api/connexion" and not self._connecte():
+            return self._repondre(401, {"erreur": "connexion nécessaire"})
         try:
             taille = int(self.headers.get("Content-Length", 0))
             q = urllib.parse.parse_qs(self.path.partition("?")[2])
@@ -517,7 +565,19 @@ class Gestionnaire(BaseHTTPRequestHandler):
                     return self._repondre(200, recevoir(relais.chemin("sources-brutes") / "imports", q["nom"][0], carnet.TYPES_IMPORT, donnees))
                 return self._repondre(200, recevoir(carnet.dossier_medias(relais.SANTE, q["debut"][0]), q["nom"][0], carnet.TYPES_MEDIA, donnees))
             demande = json.loads(self.rfile.read(taille) or "{}")
-            if self.path == "/api/lancer":
+            if self.path == "/api/connexion":
+                if acces.essayer(demande.get("mot_de_passe") or ""):
+                    self._repondre(200, {"ok": True}, cookie=acces.jeton())
+                else:
+                    self._repondre(401, {"erreur": "mot de passe incorrect"})
+            elif self.path == "/api/deconnexion":
+                self._repondre(200, {"ok": True}, cookie="")
+            elif self.path == "/api/mot-de-passe":
+                if acces.actif() and not acces.verifier(demande.get("actuel") or ""):
+                    raise ValueError("mot de passe actuel incorrect")
+                acces.definir(demande.get("nouveau") or "")
+                self._repondre(200, {"ok": True}, cookie=acces.jeton())  # les autres appareils devront se reconnecter
+            elif self.path == "/api/lancer":
                 if not TACHE.lancer(arguments(demande)):
                     return self._repondre(409, {"erreur": "une commande est déjà en cours"})
                 self._repondre(200, {"ok": True})
@@ -544,8 +604,25 @@ class Gestionnaire(BaseHTTPRequestHandler):
         pass  # pas de journal d'accès : l'interface interroge le serveur chaque seconde
 
 
+class ServeurChiffre(ThreadingHTTPServer):
+    def handle_error(self, requete, adresse):  # un appareil sans le certificat coupe la connexion : rien d'anormal
+        if not isinstance(sys.exc_info()[1], (ssl.SSLError, ConnectionError, TimeoutError)):
+            super().handle_error(requete, adresse)
+
+
+def servir_https():
+    contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    contexte.load_cert_chain(acces.CERTIFICATS / "relais.crt", acces.CERTIFICATS / "relais.key")
+    serveur = ServeurChiffre(("0.0.0.0", PORT_HTTPS), Gestionnaire)
+    # la négociation se fait dans le fil de chaque connexion : un appareil lent ne bloque pas les autres
+    serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True, do_handshake_on_connect=False)
+    serveur.serve_forever()
+
+
 if __name__ == "__main__":
     print(f"Interface relais.py sur le port {PORT} ; mode automatique : {prochain_auto() or 'désactivé'}")
     threading.Thread(target=planificateur, daemon=True).start()
     threading.Thread(target=synchro_horaire, daemon=True).start()
+    if HTTPS:
+        threading.Thread(target=servir_https, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Gestionnaire).serve_forever()
