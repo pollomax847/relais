@@ -66,7 +66,7 @@
     header { backdrop-filter: none; background: var(--fond); }
     .onglets { position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; justify-content: space-around; background: var(--carte);
                border-top: 1px solid var(--bord); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); }
-    .onglets a { padding: 6px 8px; font-size: 12.5px; }
+    .onglets a { padding: 6px 4px; font-size: 12px; }
     main { padding-bottom: 96px; }
     .lexique { grid-template-columns: 1fr; gap: 0; }
     .lexique dd { margin-bottom: 8px; }
@@ -181,6 +181,7 @@
   .zone .part { text-align: right; }
   .formulaire { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 4px 12px; align-items: end; margin-top: 8px; }
   .formulaire .pleine { grid-column: 1 / -1; }
+  select.seuil { width: auto; margin: 8px 0 0; }
   .formulaire .pleine:last-child { margin-top: 8px; }
   textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--bord); border-radius: 8px; background: var(--fond); color: var(--texte); font: inherit; resize: vertical; }
   .bouton-fichier { display: inline-block; margin: 0; padding: 8px 14px; min-width: 124px; text-align: center; border: 1px solid var(--bord); border-radius: 8px; color: var(--accent); font-size: 15px; font-weight: 500; cursor: pointer; }
@@ -216,6 +217,7 @@
     <a class="logo" href="#accueil">Relais</a>
     <nav class="onglets" aria-label="Écrans">
       <a href="#accueil" data-onglet="accueil">Accueil</a>
+      <a href="#programme" data-onglet="programme">Conseils</a>
       <a href="#activites" data-onglet="activites">Activités</a>
       <a href="#sports" data-onglet="sports">Sports</a>
       <a href="#sante" data-onglet="sante">Santé</a>
@@ -238,11 +240,17 @@
         <div class="chiffre"><b id="f-vdot">–</b><span>niveau de course</span><small id="f-vdot-ref"></small></div>
         <div class="chiffre"><b id="f-km">–</b><span>de course en 4 semaines</span><small id="f-km-avant"></small></div>
       </div>
+      <section class="carte page-aide espace" id="coach" hidden>
+        <h2>Le mot du coach</h2>
+        <p id="coach-note"></p>
+        <details id="coach-detail"><summary>Le détail</summary><div id="coach-sections"></div></details>
+        <div class="rangee bas"><button class="second" id="coach-refaire">Refaire la note</button><span class="aide" id="coach-origine"></span></div>
+      </section>
       <div class="deux-colonnes">
         <section class="carte">
           <h2>Vos conseils</h2>
           <div class="conseils" id="conseils"></div>
-          <p class="aide bas">Des règles générales d'entraînement appliquées à vos mesures, pas un avis médical.</p>
+          <p class="aide bas">Des règles générales d'entraînement appliquées à vos mesures, pas un avis médical. <a href="#programme">Votre semaine, manger, boire, vous renforcer</a></p>
         </section>
         <div id="derniere-sortie"></div>
       </div>
@@ -284,6 +292,29 @@
       </div>
 
     </div>
+  </div>
+
+  <div data-vue="programme" hidden>
+    <div class="entete-vue"><h1>Conseils</h1></div>
+    <p class="aide page-aide">Ces repères viennent d'organismes de santé, de diététiciens et d'études publiées, cités sous chaque rubrique, et Relais les applique à vos mesures. Ils ne remplacent pas un médecin, un kiné ou un diététicien, qui seuls connaissent votre santé.</p>
+    <details class="carte espace" id="reponses"><summary id="reponses-titre">Vos réponses</summary>
+      <p class="aide">Elles adaptent cette page et l'Accueil, et restent sur votre ordinateur. Une question sans réponse garde le conseil général.</p>
+      <form id="form-reponses" class="formulaire">
+        <label>Sexe<select name="sexe"><option value="">–</option><option value="femme">Femme</option><option value="homme">Homme</option></select></label>
+        <label>Année de naissance<input name="naissance" type="number" min="1900" max="2100"></label>
+        <label>Poids actuel (kg)<input name="poids_kg" type="number" min="20" max="300" step="0.1"></label>
+        <p class="aide pleine" id="derniere-pesee" hidden></p>
+        <div class="pleine aide">Jours où vous pouvez courir<div class="rangee" id="reponses-jours"></div></div>
+        <div class="pleine aide">Jours où vous pouvez faire autre chose : renforcement à la maison, marche, vélo…<div class="rangee" id="reponses-jours-autres"></div></div>
+        <div class="pleine aide">Ce qui vous plaît en plus de la course<div class="rangee"><label class="case"><input type="checkbox" name="activites" value="marche"> Marche</label><label class="case"><input type="checkbox" name="activites" value="velo"> Vélo</label><label class="case"><input type="checkbox" name="activites" value="natation"> Natation</label><label class="case"><input type="checkbox" name="activites" value="yoga"> Yoga ou étirements</label></div></div>
+        <label class="pleine">Avez-vous une mini-bande élastique ? C'est une petite boucle qu'on passe autour des cuisses pour le squat du renforcement, vendue en magasin de sport.<select name="elastique"><option value="">–</option><option value="oui">Oui</option><option value="non">Non</option></select></label>
+        <label class="pleine">Blessure ayant stoppé la course depuis 3 mois, opération d'une jambe depuis 6 mois, fracture du dos, du bassin ou d'une jambe depuis un an, ou douleur qui gêne la course aujourd'hui ?<select name="blessure"><option value="">–</option><option value="oui">Oui</option><option value="non">Non</option></select></label>
+        <label class="pleine">Diabète, maladie du cœur ou des reins, grossesse, autre maladie générale ou neurologique, ou régime particulier ?<select name="sante"><option value="">–</option><option value="oui">Oui</option><option value="non">Non</option></select></label>
+        <div class="pleine"><button type="submit">Enregistrer</button> <span class="aide" id="reponses-etat"></span></div>
+      </form>
+    </details>
+    <p class="aide" id="sans-programme">Ces conseils apparaissent après la prochaine mise à jour de la santé (Réglages).</p>
+    <div id="programme"></div>
   </div>
 
   <div data-vue="activites" hidden>
@@ -385,6 +416,7 @@
         <button data-periode="1an">1 an</button><button data-periode="3ans">3 ans</button><button data-periode="tout">Tout</button>
       </div>
     </div>
+    <p class="aide" id="sante-synchro"></p>
     <div class="chiffres">
       <div class="chiffre"><b id="s-pas">–</b><span>pas, dernière journée</span><small id="s-pas-date"></small></div>
       <div class="chiffre"><b id="s-sommeil">–</b><span>dernière nuit</span><small id="s-sommeil-date"></small></div>
@@ -482,6 +514,8 @@
         <label>Jeûne (h)<input name="jeune_h" type="number" step="any" min="0"></label>
         <div class="pleine"><button type="submit" class="second">Enregistrer</button></div>
       </form>
+      <p class="aide">Un champ grisé utilise la suggestion de Relais. Une valeur saisie la remplace.</p>
+      <ul class="aide" id="suggestions-cibles"></ul>
     </section>
 
     <div id="bloc-compte" hidden>
@@ -501,7 +535,8 @@
       <h2>Les écrans</h2>
       <p>Relais rassemble toutes vos données de sport au même endroit, sur votre ordinateur.</p>
       <dl class="lexique">
-        <dt><a href="#accueil">Accueil</a></dt><dd>Où vous en êtes aujourd'hui : votre forme, vos conseils, votre dernière sortie, et votre entraînement semaine par semaine.</dd>
+        <dt><a href="#accueil">Accueil</a></dt><dd>Où vous en êtes aujourd'hui : votre forme, le mot du coach, vos conseils, votre dernière sortie, et votre entraînement semaine par semaine.</dd>
+        <dt><a href="#programme">Conseils</a></dt><dd>Votre semaine type, quoi manger et boire, comment vous échauffer et vous renforcer, avec les sources. Quelques questions en haut de l'écran les adaptent à vous, autres sports compris.</dd>
         <dt><a href="#activites">Activités</a></dt><dd>Toutes vos sorties, en cartes ou en liste. Cliquez sur une sortie pour voir son parcours, ses courbes et ses temps au kilomètre, ou pour y ajouter un titre, des notes et des photos.</dd>
         <dt><a href="#sports">Sports</a></dt><dd>Un onglet par sport pratiqué : totaux, records, progression, et ce qui lui est propre, comme vos exercices de musculation ou vos longueurs de natation.</dd>
         <dt><a href="#sante">Santé</a></dt><dd>Vos pas, votre sommeil, votre poids, votre pouls et votre énergie, jour après jour, et le détail d'une journée.</dd>
@@ -555,7 +590,7 @@
       <h2>L'intensité</h2>
       <p>Elle dépend de votre pouls. Le plus simple pour vous repérer est votre souffle :</p>
       <table class="valeurs repere"><thead><tr><th>Intensité</th><th>Votre pouls</th><th>Comment vous vous sentez</th></tr></thead><tbody id="t-aide-intensite"></tbody></table>
-      <p>Pour progresser, faites environ 80 % de votre temps en facile ou très facile, et gardez le dur pour une ou deux séances par semaine.</p>
+      <p>Si vous courez plusieurs fois par semaine, faites environ 80 % de votre temps en facile ou très facile, et gardez le dur pour une ou deux séances. Si vous ne courez qu'une fois par semaine, ajoutez d'abord une sortie tranquille.</p>
     </section>
 
     <section class="carte page-aide espace" id="aide-repères">
@@ -574,14 +609,14 @@
 
     <section class="carte page-aide espace" id="aide-conseils">
       <h2>Les conseils</h2>
-      <p>Ils viennent de règles d'entraînement courantes, appliquées à vos mesures : aucune donnée ne quitte votre ordinateur pour ça. Chaque conseil cite le chiffre qui l'a déclenché, pour que vous puissiez le vérifier. Ce ne sont pas des avis médicaux : si quelque chose vous inquiète, parlez-en à un médecin.</p>
-      <dl class="lexique"><dt>À faire</dt><dd>Ce qui vous ferait le plus progresser.</dd><dt>À surveiller</dt><dd>Un signal à garder à l'œil.</dd><dt>Bien</dt><dd>Ce qui marche, à continuer.</dd></dl>
+      <p>Ils viennent de règles d'entraînement courantes, appliquées à vos mesures et comparées à vos habitudes : aucune donnée ne quitte votre ordinateur pour ça. Chaque conseil cite le chiffre qui l'a déclenché, pour que vous puissiez le vérifier. Ils ne se contredisent pas : si un signal demande de lever le pied, aucun conseil ne vous demande d'en faire plus. Ce ne sont pas des avis médicaux : si quelque chose vous inquiète, parlez-en à un médecin.</p>
+      <dl class="lexique"><dt>À faire</dt><dd>Ce qui vous ferait le plus progresser.</dd><dt>À surveiller</dt><dd>Un signal à garder à l'œil.</dd><dt>Idée</dt><dd>Un plus, si vous avez le temps.</dd><dt>Bien</dt><dd>Ce qui marche, à continuer.</dd></dl>
     </section>
 
     <section class="carte page-aide espace" id="aide-auto">
       <h2>Ce qui se fait tout seul</h2>
       <dl class="lexique">
-        <dt>Chaque heure</dt><dd>Relais regarde si votre montre a enregistré de nouvelles sorties sur votre compte Garmin, et les ajoute.</dd>
+        <dt>Toutes les 15 minutes</dt><dd>Relais demande à Garmin si votre montre lui a envoyé de nouvelles données. Si oui, il copie les sorties, les pas, le sommeil et le détail des journées. La montre envoie ses données par le téléphone toutes les 4 heures ou tous les 2 000 pas, et après chaque activité : Relais ne peut pas les voir avant. Ce rythme se règle dans Réglages, à l'essai.</dd>
         <dt>Chaque nuit, à 4 h</dt><dd>Il met tout à jour : sorties, santé, statistiques et conseils.</dd>
         <dt>Montre branchée</dt><dd>Il la sauvegarde et lui dépose vos parcours en attente.</dd>
       </dl>
@@ -626,7 +661,7 @@
     <div class="titre-section">Mettre à jour</div>
     <section class="carte">
       <div class="action"><div><b>Tout faire</b><p class="aide">Montre, activités de Garmin, conversion, santé, puis les envois de SPORT_AUTO_DESTINATIONS (aucun par défaut). C'est aussi le passage de nuit.</p></div><button data-commande="auto">Tout faire</button></div>
-      <div class="action"><div><b>Synchro Garmin</b><p class="aide">Les nouvelles activités de la montre chez Garmin. Se fait seule chaque heure.</p></div><button class="second" data-commande="garmin">Synchroniser</button></div>
+      <div class="action"><div><b>Synchro Garmin</b><p class="aide">Ce que la montre a envoyé à votre compte Garmin : activités, pas, sommeil, détail des journées. Relais regarde toutes les 15 minutes et copie dès qu'il y a du neuf.</p><p class="aide" id="synchro-garmin"></p></div><button class="second" data-commande="garmin">Synchroniser</button></div>
       <div class="action"><div><b>Santé et performance</b><p class="aide">Pas, poids, sommeil, conseils et statistiques. Les pesées partent aussi vers Garmin.</p></div><button class="second" data-commande="sante">Mettre à jour</button></div>
       <div class="action"><div><b>Bibliothèque</b><p class="aide">Relit toutes les sources et refait activites-v2 ; l'ancienne version va dans a-supprimer/. Environ 12 min.</p></div><button class="second" data-commande="preparer">Reconvertir</button></div>
       <div class="action"><div><b>Montre</b><p class="aide">Sauvegarde la montre branchée et lui dépose les parcours en attente.</p></div><button class="second" data-commande="montre">Sauvegarder</button></div>
@@ -650,6 +685,32 @@
         <div class="pleine rangee"><button type="submit">Enregistrer</button><button type="button" class="second" id="deconnexion">Se déconnecter</button><span class="aide" id="acces-message" role="status"></span></div>
       </form>
     </section>
+
+    <div id="bloc-montre" hidden>
+    <div class="titre-section">Réglages de la montre</div>
+    <section class="carte">
+      <div class="entete-carte"><h2 id="montre-nom">Montre</h2></div>
+      <p class="aide">Ils passent par votre compte Garmin, comme dans l'appli : la montre les reçoit à sa prochaine synchronisation. Relais ne change que ce que vous modifiez ici.</p>
+      <form id="form-montre" class="formulaire">
+        <div class="pleine aide">Annonces vocales, lues par le téléphone pendant une activité<div class="rangee">
+          <label class="case"><input type="checkbox" name="audioPromptLapEnabled"> À chaque kilomètre</label>
+          <label class="case"><input type="checkbox" name="audioPromptSpeedPaceEnabled"> Avec l'allure</label>
+          <label class="case"><input type="checkbox" name="audioPromptHeartRateEnabled"> Avec le pouls</label></div></div>
+        <label>Langue des annonces<select name="audioPromptDialectType"><option value="FR_FR">Français</option><option value="EN_US">Anglais (États-Unis)</option></select></label>
+        <label>Envoi des données à Garmin, toutes les<select name="autoSyncMinutesBeforeSync"><option value="60">heures</option><option value="120">2 heures</option><option value="240">4 heures</option></select></label>
+        <label>ou tous les<select name="autoSyncStepsBeforeSync"><option value="1000">1 000 pas</option><option value="2000">2 000 pas</option></select></label>
+        <p class="aide pleine">L'envoi est à l'essai : Garmin ne documente pas ce réglage pour votre montre. Relais vérifie que votre compte l'enregistre, pas que la montre l'applique. Plus souvent, vos données arrivent plus tôt dans Relais, contre un peu de batterie.</p>
+        <div class="pleine aide">Alertes au repos
+          <div class="rangee"><label class="case"><input type="checkbox" name="activityTracking.highHrAlertEnabled"> Pouls au-dessus de</label><select class="seuil" name="activityTracking.highHrAlertThreshold" aria-label="Seuil haut"><option value="100">100</option><option value="110">110</option><option value="120">120</option><option value="130">130</option><option value="140">140</option><option value="150">150</option></select></div>
+          <div class="rangee"><label class="case"><input type="checkbox" name="activityTracking.lowHrAlertEnabled"> Pouls en dessous de</label><select class="seuil" name="activityTracking.lowHrAlertThreshold" aria-label="Seuil bas"><option value="35">35</option><option value="40">40</option><option value="45">45</option><option value="50">50</option></select></div>
+          <div class="rangee"><label class="case"><input type="checkbox" name="activityTracking.moveAlertEnabled"> Rappel de bouger</label></div></div>
+        <div class="pleine aide">Sons<div class="rangee">
+          <label class="case"><input type="checkbox" name="alertTonesEnabled"> Bips des alertes</label>
+          <label class="case"><input type="checkbox" name="keyTonesEnabled"> Bips des touches</label></div></div>
+        <div class="pleine rangee"><button type="submit">Enregistrer sur la montre</button><span class="aide" id="montre-message" role="status"></span></div>
+      </form>
+    </section>
+    </div>
 
     <div class="titre-section">Compte Garmin</div>
     <section class="carte">
@@ -829,6 +890,40 @@ function majDestination(nom, d) {
   bouton.title = enCours ? "Une commande est déjà en cours" : !restantes ? "Rien de nouveau à envoyer" : "";
 }
 
+// Réglages de la montre, par le compte Garmin : seuls les champs modifiés partent, puis Relais relit ce que Garmin garde
+const MONTRE = { lus: null, enCours: false };
+
+async function chargerMontre() {
+  MONTRE.enCours = true; $("montre-message").textContent = "Lecture sur votre compte Garmin…";
+  try { MONTRE.lus = await api("/api/montre"); afficherMontre(); $("montre-message").textContent = ""; }
+  catch (err) { $("montre-message").textContent = err.message; }
+  MONTRE.enCours = false;
+}
+
+function afficherMontre() {
+  const r = MONTRE.lus.reglages;
+  $("montre-nom").textContent = MONTRE.lus.montre || "Montre";
+  for (const el of $("form-montre").elements) if (el.name in r) { if (el.type === "checkbox") el.checked = !!r[el.name]; else el.value = r[el.name] ?? ""; }
+}
+
+$("form-montre").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (!MONTRE.lus) return;
+  const changements = {};
+  for (const el of ev.target.elements) {
+    if (!(el.name in MONTRE.lus.reglages) || (el.type !== "checkbox" && el.value === "")) continue;
+    const valeur = el.type === "checkbox" ? el.checked : /^\d+$/.test(el.value) ? Number(el.value) : el.value;
+    if (valeur !== MONTRE.lus.reglages[el.name]) changements[el.name] = valeur;
+  }
+  if (!Object.keys(changements).length) { $("montre-message").textContent = "Rien n'a changé."; return; }
+  $("montre-message").textContent = "Envoi à Garmin…";
+  try {
+    MONTRE.lus = await api("/api/montre", { changements }); afficherMontre();
+    const gardes = Object.keys(changements).filter((c) => MONTRE.lus.reglages[c] !== changements[c]).length;
+    $("montre-message").textContent = gardes ? `Garmin a gardé l'ancienne valeur pour ${gardes} réglage${gardes > 1 ? "s" : ""}.` : "Enregistré : la montre le recevra à sa prochaine synchronisation.";
+  } catch (err) { $("montre-message").textContent = err.message; }
+});
+
 async function rafraichirEtat() {
   try {
     const e = await api("/api/etat");
@@ -838,6 +933,10 @@ async function rafraichirEtat() {
     $("c-conversion").textContent = b.convertie_le || "–";
     for (const [nom, d] of Object.entries(e.destinations)) majDestination(nom, d);
     compte("garmin", e.garmin_connecte, "Changer de compte", "Se connecter");
+    $("bloc-montre").hidden = !e.garmin_connecte;
+    if (e.garmin_connecte && !MONTRE.lus && !MONTRE.enCours) chargerMontre();
+    const s = e.garmin_synchro || {}, synchro = s.envoi ? `Dernier envoi de la montre à Garmin : ${s.envoi}${s.copie ? `, copié dans Relais le ${s.copie}` : ""}.` : "";
+    $("synchro-garmin").textContent = synchro; $("sante-synchro").textContent = synchro;
     etiquette($("e-acces"), e.mot_de_passe ? "ok" : "attente", e.mot_de_passe ? "activé" : "à choisir");
     $("acces-aide").textContent = e.mot_de_passe ? "Demandé sur chaque appareil, une fois par mois. En cas d'oubli : outils/relais.py mot-de-passe, dans un terminal." : "Choisissez un mot de passe d'au moins 8 caractères : il sera demandé sur le téléphone comme sur l'ordinateur.";
     $("acces-actuel").hidden = !e.mot_de_passe; $("deconnexion").hidden = !e.mot_de_passe;
@@ -1068,17 +1167,20 @@ function graphique(conteneur, { valeurs, forme, debut, fin, format, pas, axe, ec
 
 function derniere(serie, i = 1) { return [...serie].reverse().find((l) => l[i] != null); }
 
-function tuile(id, ligne, format, i = 1) {
+// la cible choisie dans Profil, sinon la suggestion de Relais
+const cibleDe = (cle) => +CARNET.donnees?.cibles[cle] || PERFORMANCE.donnees?.programme?.suggestions[cle]?.valeur;
+
+function tuile(id, ligne, format, i = 1, objectif) {
   $(id).textContent = ligne ? format(ligne[i]) : "–";
-  $(`${id}-date`).textContent = ligne ? `le ${dateFr(jourDe(ligne[0]))}` : "aucune valeur";
+  $(`${id}-date`).textContent = `${ligne ? `le ${dateFr(jourDe(ligne[0]))}` : "aucune valeur"}${objectif ? ` · objectif ${format(objectif)}` : ""}`;
 }
 
 function afficherSante() {
   const s = SANTE.donnees; if (!s) return;
   document.querySelectorAll("#periodes button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.periode === SANTE.periode));
-  tuile("s-pas", derniere(s.pas), formats.pas);
-  tuile("s-poids", derniere(s.poids), formats.poids);
-  tuile("s-sommeil", derniere(s.sommeil), formats.sommeil);
+  tuile("s-pas", derniere(s.pas), formats.pas, 1, cibleDe("pas"));
+  tuile("s-poids", derniere(s.poids), formats.poids, 1, cibleDe("poids"));
+  tuile("s-sommeil", derniere(s.sommeil), formats.sommeil, 1, cibleDe("sommeil"));
   tuile("s-fc", derniere(s.montre, 2), (v) => `${Math.round(v)} bpm`, 2);
   const fin = new Date(), toutes = [...s.pas, ...s.poids, ...s.sommeil].map((l) => jourDe(l[0]));
   const jours = PERIODES[SANTE.periode];
@@ -1189,7 +1291,7 @@ $("jour-minute").addEventListener("change", (ev) => { if (ev.target.value) charg
 
 // --- Performance : calculée par relais.py sante, dans sante/performance.json
 const PERFORMANCE = { donnees: null };
-const NIVEAUX_CONSEIL = { action: ["ko", "À faire"], attention: ["attente", "À surveiller"], bien: ["ok", "Bien"] };
+const NIVEAUX_CONSEIL = { action: ["ko", "À faire"], attention: ["attente", "À surveiller"], idee: ["neutre", "Idée"], bien: ["ok", "Bien"] };
 const tempsFr = (s) => { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = Math.round(s % 60); return `${h ? `${h}:${String(m).padStart(2, "0")}` : m}:${String(r).padStart(2, "0")}`; };
 const allureFr = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60) % 60).padStart(2, "0")}`;
 
@@ -1214,13 +1316,42 @@ function dessinerZones(conteneur, parts, fcMax) {
   }));
 }
 
+// Les questions de l'écran Conseils : une réponse arrive tout de suite dans la page, le serveur refait le texte
+const QUESTIONS = ["sexe", "naissance", "poids_kg", "elastique", "blessure", "sante"];
+const GROUPES = { jours: Number, jours_autres: Number, activites: String };  // cases à cocher, et le type de leurs valeurs
+for (const [id, groupe] of [["reponses-jours", "jours"], ["reponses-jours-autres", "jours_autres"]]) {
+  $(id).append(...["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map((nom, i) => {
+    const case_ = document.createElement("label"), coche = document.createElement("input");
+    case_.className = "case"; coche.type = "checkbox"; coche.name = groupe; coche.value = i; case_.append(coche, ` ${nom}`); return case_;
+  }));
+}
+
+function afficherReponses() {
+  const profil = CARNET.donnees?.profil, form = $("form-reponses"); if (!profil) return;
+  for (const cle of QUESTIONS) form.elements[cle].value = profil[cle] ?? "";
+  for (const [groupe, type] of Object.entries(GROUPES)) form.querySelectorAll(`[name=${groupe}]`).forEach((c) => { c.checked = (profil[groupe] || []).includes(type(c.value)); });
+  const groupes = Object.keys(GROUPES), repondues = QUESTIONS.filter((cle) => profil[cle]).length + groupes.filter((g) => profil[g]?.length).length, total = QUESTIONS.length + groupes.length;
+  $("reponses-titre").textContent = repondues < total ? `Quelques questions pour mieux vous conseiller (${repondues} sur ${total})` : "Vos réponses";
+  $("reponses").open = repondues < total;
+}
+
+$("form-reponses").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const champs = new FormData(ev.target), poids = champs.get("poids_kg");
+  if (poids && poids !== String(CARNET.donnees.profil.poids_kg)) await noter("profil", "poids_date", new Date().toLocaleDateString("sv"));
+  for (const cle of QUESTIONS) await noter("profil", cle, champs.get(cle) || null);
+  for (const [groupe, type] of Object.entries(GROUPES)) await noter("profil", groupe, champs.getAll(groupe).map(type));
+  await chargerPerformance();
+  afficherReponses(); $("reponses").open = true; $("reponses-etat").textContent = "Enregistré.";
+});
+
 // --- Carnet : ce que vous saisissez vous-même, gardé dans sante/carnet.json
 const CARNET = { donnees: null }, FAMILLES = { tout: "Tous les sports", course: "Course", marche: "Marche", randonnee: "Randonnée", velo: "Vélo", natation: "Natation", musculation: "Musculation" };
 const dansFamille = (categorie, f) => f === "tout" || categorie.startsWith(f);
 const dateCourte = (texte) => new Date(texte).toLocaleDateString("fr-FR");
 
 async function chargerCarnet() {
-  try { CARNET.donnees = await api("/api/carnet"); $("choix-masquees").hidden = !Object.values(CARNET.donnees.activites).some((a) => a.masquee); } catch (err) { /* serveur en redémarrage */ }
+  try { CARNET.donnees = await api("/api/carnet"); $("choix-masquees").hidden = !Object.values(CARNET.donnees.activites).some((a) => a.masquee); afficherReponses(); } catch (err) { /* serveur en redémarrage */ }
 }
 
 async function noter(section, cle, valeur) {
@@ -1290,6 +1421,13 @@ function afficherProfil() {
   options("objectif-sport", Object.entries(FAMILLES));
   options("materiel-defaut", [["", "–"], ...[...new Set(ACTIVITES.toutes.map((l) => l.categorie))].sort().map((c) => [c, nomCategorie(c)])]);
   for (const [cle, valeur] of Object.entries(CARNET.donnees.cibles)) { const c = $("form-cibles").elements[cle]; if (c) c.value = valeur; }
+  const suggestions = PERFORMANCE.donnees?.programme?.suggestions || {};
+  for (const [cle, s] of Object.entries(suggestions)) $("form-cibles").elements[cle].placeholder = s.valeur;
+  $("suggestions-cibles").replaceChildren(...Object.values(suggestions).map((s) => {
+    const ligne = document.createElement("li"), lien = document.createElement("a");
+    lien.textContent = s.source.nom; lien.href = s.source.url; lien.target = "_blank"; lien.rel = "noopener";
+    ligne.append(`${s.texte} Source : `, lien); return ligne;
+  }));
 }
 
 function remplirEdition(l) {
@@ -1492,7 +1630,7 @@ function afficherCompte() {
 // Journal de santé d'Endurain : eau, jeûne, transit
 function afficherJournal() {
   const c = CARNET.donnees; if (!c) return;
-  const jour = new Date().toLocaleDateString("sv"), eau = +c.eau[jour] || 0, cible = c.cibles.eau_ml;
+  const jour = new Date().toLocaleDateString("sv"), eau = +c.eau[jour] || 0, cible = cibleDe("eau_ml");
   $("j-eau").textContent = `${nombre(eau)} ml aujourd'hui${cible ? ` sur ${nombre(+cible)}` : ""}`;
   const dernier = [...c.jeune].sort((a, b) => b.debut.localeCompare(a.debut))[0], enCoursJ = dernier && !dernier.fin;
   $("jeune-bouton").textContent = enCoursJ ? "Terminer le jeûne" : "Commencer un jeûne";
@@ -1580,6 +1718,42 @@ function lignesTableau(corps, lignes) {
   }));
 }
 
+// le texte vient de programme.py : ici, seulement la mise en page
+function afficherCoach() {
+  const c = PERFORMANCE.donnees?.coach; $("coach").hidden = !c; if (!c) return;
+  const element = (balise, texte) => { const e = document.createElement(balise); e.textContent = texte; return e; };
+  $("coach-note").hidden = !c.note; $("coach-note").textContent = c.note || "";
+  $("coach-detail").open = !c.note;
+  $("coach-sections").replaceChildren(...c.sections.flatMap((s) => {
+    const liste = document.createElement("ul"); liste.append(...s.points.map((t) => element("li", t))); return [element("h3", s.titre), liste];
+  }));
+  $("coach-origine").textContent = `Note du ${dateFr(jourDe(c.date))}, ${c.note ? "rédigée sur votre ordinateur à partir des chiffres de Relais" : "écrite par les règles de Relais"}. Pas un avis médical.`;
+}
+$("coach-refaire").addEventListener("click", () => lancer({ commande: "coach" }));
+
+function afficherProgramme() {
+  const p = PERFORMANCE.donnees?.programme; if (!p) return;
+  $("derniere-pesee").hidden = !p.pesee; $("derniere-pesee").textContent = `Dernier poids connu : ${p.pesee}.`;
+  const element = (balise, texte) => { const e = document.createElement(balise); if (texte) e.textContent = texte; return e; };
+  $("sans-programme").hidden = true;
+  $("programme").replaceChildren(...p.sections.map((s) => {
+    const carte = element("section"), sources = element("p", "Sources : ");
+    carte.className = "carte page-aide espace"; carte.append(element("h2", s.titre));
+    if (s.intro) carte.append(element("p", s.intro));
+    if (s.tableau) {
+      const table = element("table"), tete = element("tr"), corps = element("tbody"), thead = element("thead");
+      table.className = "valeurs repere"; tete.append(...s.tableau.titres.map((t) => element("th", t))); thead.append(tete);
+      lignesTableau(corps, s.tableau.lignes); table.append(thead, corps); carte.append(table);
+    }
+    if (s.points.length) { const liste = element("ul"); liste.append(...s.points.map((t) => element("li", t))); carte.append(liste); }
+    s.sources.forEach((source, i) => {
+      const lien = element("a", source.nom); lien.href = source.url; lien.target = "_blank"; lien.rel = "noopener";
+      sources.append(...(i ? [" · ", lien] : [lien]));
+    });
+    sources.className = "aide"; carte.append(sources); return carte;
+  }));
+}
+
 function afficherPerformance() {
   const p = PERFORMANCE.donnees; if (!p || !p.date) return;
   $("performance").hidden = false; $("sans-performance").hidden = true;
@@ -1640,7 +1814,7 @@ function afficherPerformance() {
 }
 
 async function chargerPerformance() {
-  try { PERFORMANCE.donnees = await api("/api/performance"); afficherPerformance(); } catch (err) { /* serveur en redémarrage */ }
+  try { PERFORMANCE.donnees = await api("/api/performance"); afficherPerformance(); afficherProgramme(); afficherCoach(); } catch (err) { /* serveur en redémarrage */ }
 }
 
 // --- Activités : la bibliothèque, puis le détail de la ligne choisie
@@ -1994,7 +2168,7 @@ let redessin = 0;
 window.addEventListener("resize", () => { cancelAnimationFrame(redessin); redessin = requestAnimationFrame(() => { afficherPerformance(); afficherSante(); dessinerJournee(); dessinerActivite(); }); });
 
 // --- Écrans : un seul à la fois, d'après l'adresse (#sante, #activite/<fichier>…), pour que le retour du navigateur marche
-const VUES = { accueil: "Accueil", activites: "Activités", sports: "Sports", sante: "Santé", profil: "Profil", reglages: "Réglages", aide: "Aide" };
+const VUES = { accueil: "Accueil", programme: "Conseils", activites: "Activités", sports: "Sports", sante: "Santé", profil: "Profil", reglages: "Réglages", aide: "Aide" };
 
 function route() {
   const [racine, ...reste] = location.hash.slice(1).split("/");
@@ -2009,6 +2183,7 @@ function route() {
   if (vue === "accueil") { afficherPerformance(); afficherDerniereSortie().catch(() => {}); }
   if (vue === "sante") { afficherSante(); dessinerJournee(); afficherJournal(); }
   if (vue === "profil") afficherProfil();
+  if (vue === "programme") afficherProgramme();
   if (vue === "sports") afficherSports(reste[0] && decodeURIComponent(reste[0]));
   if (vue === "aide") {
     afficherAide();
@@ -2027,7 +2202,7 @@ changerMode(ACTIVITES.mode);
 Promise.all([chargerPerformance(), chargerCarnet().then(() => chargerActivites())]).then(() => {
   afficherActivites(); afficherAide();
   if ($("performance").offsetParent) afficherDerniereSortie().catch(() => {});
-  if (/^#(activite\/|profil|sports)/.test(location.hash)) route();
+  if (/^#(activite\/|profil|sports|sante)/.test(location.hash)) route();
 });
 chargerCompte();
 chargerSante();

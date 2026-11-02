@@ -6,7 +6,8 @@ Chaque bouton lance une commande relais.py et affiche sa sortie en direct. La co
 « envoyer garmin » les réutilise. La page montre aussi la bibliothèque : chaque activité, sa carte et ses courbes.
 
 Mode automatique : « relais.py auto » est lancé chaque jour à SPORT_AUTO_HEURE (« 04:00 » par défaut,
-« non » pour le désactiver), si aucune autre commande ne tourne ; « relais.py garmin » l'est chaque heure. Port : SPORT_WEB_PORT (8090 par défaut).
+« non » pour le désactiver), si aucune autre commande ne tourne ; « relais.py garmin » l'est dès que la montre a envoyé
+du neuf à Garmin, vérifié toutes les 15 minutes. Port : SPORT_WEB_PORT (8090 par défaut).
 
 Après relais.py certificat, le port suivant sert la même interface en https, et les appareils du réseau y sont renvoyés.
 """
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import acces
 import carnet
+import programme
 import relais
 
 RELAIS_PY = Path(__file__).resolve().parent / "relais.py"
@@ -111,11 +113,22 @@ def planificateur():
         time.sleep(61)
 
 
-def synchro_horaire():
-    """Chaque heure, les nouvelles activités de la montre chez Garmin, comme le faisait Endurain. Si une commande tourne, à l'heure suivante."""
+COUP_D_OEIL = 15 * 60  # secondes entre deux questions à Garmin sur le dernier envoi de la montre
+
+
+def synchro_garmin():
+    """Toutes les 15 minutes, une seule demande à Garmin : la montre a-t-elle envoyé du neuf depuis la dernière copie ?
+    Si oui, « relais.py garmin » le copie ; si une commande tourne, au coup d'œil suivant. L'appli Garmin Connect lit la
+    montre en Bluetooth : Relais, lui, ne voit que ce qu'elle a déjà envoyé au compte."""
     while prochain_auto() is not None:
-        time.sleep(3600)
-        if relais.JETONS_GARMIN.is_dir() and any(relais.JETONS_GARMIN.iterdir()):
+        time.sleep(COUP_D_OEIL)
+        if not (relais.JETONS_GARMIN.is_dir() and any(relais.JETONS_GARMIN.iterdir())):
+            continue
+        try:
+            envoi = relais.envoi_montre(relais.connexion_garmin())
+        except Exception:  # Garmin injoignable : au coup d'œil suivant
+            continue
+        if envoi and envoi != relais.etat_garmin().get("envoi_montre"):
             TACHE.lancer(["garmin"])
 
 
@@ -150,6 +163,8 @@ def etat():
         "montre": str(montre) if montre else None,
         "prochain_auto": prochain.strftime("%d/%m à %H:%M") if (prochain := prochain_auto()) else None,
         "garmin_connecte": relais.JETONS_GARMIN.is_dir() and any(relais.JETONS_GARMIN.iterdir()),
+        "garmin_synchro": {"envoi": datetime.fromtimestamp(e["envoi_montre"] / 1000).strftime("%d/%m à %H:%M") if (e := relais.etat_garmin()).get("envoi_montre") else None,
+                           "copie": datetime.fromisoformat(e["copie"]).strftime("%d/%m à %H:%M") if e.get("copie") else None},
         "mot_de_passe": acces.actif(),
         "commande": TACHE.commande if TACHE.en_cours() else None,
     }
@@ -171,12 +186,16 @@ def sante():
 
 
 def performance():
-    """Statistiques et conseils calculés par relais.py sante, avec la copie de Smashrun."""
+    """Statistiques et conseils calculés par relais.py sante, avec la copie de Smashrun et l'écran Conseils selon vos réponses."""
     fichier, smashrun = relais.SANTE / "performance.json", relais.SANTE / "smashrun.json"
     resultat = json.loads(fichier.read_text()) if fichier.exists() else {}
     if resultat and smashrun.exists():
         copie = json.loads(smashrun.read_text())
         resultat["smashrun"] = {c: copie[c] for c in ("stats", "annee", "badges")}
+    if resultat:
+        programme.appliquer(resultat, carnet.lire(relais.SANTE)["profil"], relais.SANTE, relais.GARMIN_CONNECT, date.today())
+    if resultat and (note := relais.SANTE / "coach.json").exists():
+        resultat["coach"] = json.loads(note.read_text())
     return resultat
 
 
@@ -411,7 +430,7 @@ def code_mfa(code):
 def arguments(demande):
     """Traduit un bouton de l'interface en arguments de relais.py (rien d'autre n'est accepté)."""
     commande = demande.get("commande")
-    if commande in ("montre", "etat", "sante", "auto", "preparer", "satellites", "garmin", "collecte"):
+    if commande in ("montre", "etat", "sante", "coach", "auto", "preparer", "satellites", "garmin", "collecte"):
         return [commande]
     if commande == "convertir":
         chemin = (demande.get("chemin") or "").strip()
@@ -488,6 +507,11 @@ class Gestionnaire(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/fit?"):
             chemin = fit_bibliotheque(self.path.partition("fichier=")[2])
             self._repondre(200, chemin.read_bytes(), "application/octet-stream") if chemin else self._repondre(404, {"erreur": "introuvable"})
+        elif self.path == "/api/montre":
+            try:
+                self._repondre(200, relais.lire_reglages_montre(relais.connexion_garmin()))
+            except Exception as e:  # pas encore connecté à Garmin, ou Garmin injoignable
+                self._repondre(400, {"erreur": f"réglages de la montre indisponibles ({e})"})
         elif self.path == "/api/performance":
             self._repondre(200, performance())
         elif self.path == "/api/details-sports":
@@ -588,6 +612,8 @@ class Gestionnaire(BaseHTTPRequestHandler):
                 self._repondre(200, connexion_garmin(demande["email"], demande["mot_de_passe"]))
             elif self.path == "/api/garmin/mfa":
                 self._repondre(200, code_mfa(demande["code"]))
+            elif self.path == "/api/montre":
+                self._repondre(200, relais.changer_reglages_montre(relais.connexion_garmin(), demande.get("changements") or {}))
             elif self.path == "/api/carnet":
                 self._repondre(200, carnet.modifier(relais.SANTE, demande["section"], demande.get("cle"), demande.get("valeur")))
             elif self.path == "/api/retirer-media":
@@ -622,7 +648,7 @@ def servir_https():
 if __name__ == "__main__":
     print(f"Interface relais.py sur le port {PORT} ; mode automatique : {prochain_auto() or 'désactivé'}")
     threading.Thread(target=planificateur, daemon=True).start()
-    threading.Thread(target=synchro_horaire, daemon=True).start()
+    threading.Thread(target=synchro_garmin, daemon=True).start()
     if HTTPS:
         threading.Thread(target=servir_https, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Gestionnaire).serve_forever()

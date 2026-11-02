@@ -1,5 +1,5 @@
 """Ce que vous saisissez vous-même, repris d'Endurain et de ses champs : titre, description, notes, ressenti et matériel des
-activités, matériel et composants, objectifs, cibles de santé, eau, jeûne, transit. Le tout dans sante/carnet.json, en dehors
+activités, matériel et composants, objectifs, cibles de santé, eau, jeûne, transit, réponses de l'écran Conseils. Le tout dans sante/carnet.json, en dehors
 de activites-v2/, que chaque conversion refait : une activité y est repérée par son heure de départ, qui survit à un
 changement de nom de fichier. Les photos d'une activité vont dans sante/medias/.
 """
@@ -9,7 +9,7 @@ import threading
 import uuid
 from pathlib import Path
 
-SECTIONS_DICT = ("activites", "cibles", "eau", "materiel_defaut")  # une valeur par clé
+SECTIONS_DICT = ("activites", "cibles", "eau", "materiel_defaut", "profil")  # une valeur par clé
 SECTIONS_LISTE = ("materiel", "objectifs", "jeune", "transit")  # des fiches avec un identifiant
 CHAMPS_ACTIVITE = ("titre", "description", "notes", "ressenti", "effort", "materiel", "masquee")
 TYPES_MEDIA = {".jpg", ".jpeg", ".png", ".webp"}

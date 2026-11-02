@@ -19,6 +19,7 @@ import math
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import date, timedelta
+from itertools import count
 from statistics import median, pstdev
 
 import fitconv
@@ -32,12 +33,21 @@ PAUSE_MAX = 60  # s entre deux points ; au-delà, l'appareil était arrêté
 RECENT = 182  # jours pris en compte pour le niveau actuel
 MONTRES = ("Garmin", "Zepp", "TomTom")  # seuls ces enregistreurs donnent une distance fiable pour un record
 FC_FACILE = .75  # part de la FC maximale sous laquelle une séance reste facile
+FC_DUR = .8  # part de la FC maximale au-dessus de laquelle le temps de course compte comme dur (zones « Dur » et « Maximal »)
+DUR_TROP = 35  # % de temps dur à partir duquel les sorties sont toutes soutenues
+REGULIER = 3  # semaines courues sur 4
+ENERGIE_BASSE = 50  # sur 100, au mieux de la journée
+ENERGIE_ECART = 10  # points sous l'habitude de l'année : en deçà, c'est la variation normale
+HAUSSE_KM = 10  # km sur 4 semaines : une hausse plus petite ne compte pas, même forte en pourcentage
 VOLUME_MARATHON = 30  # km par semaine : en dessous, un temps de marathon prédit ne veut rien dire
 COURSE_MIN, COURSE_MAX = 1.8, 6.5  # m/s : en deçà on marche, au-delà c'est un saut de GPS
 VO2_DUREE = 900  # s de course au moins, pour une estimation
 VO2_RESERVE = .65  # part de réserve cardiaque minimale : plus bas, la FC dit peu de chose de la vitesse
 VO2_JOURS, VO2_SEANCES = 90, 10  # l'estimation actuelle : médiane des dernières séances
 VO2_ECART = 2  # en deçà, une différence entre deux trimestres n'est que le bruit des séances (±5 d'une sortie à l'autre)
+
+
+MOIS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre")
 
 
 def lire_points(chemin):
@@ -132,6 +142,11 @@ def moyenne(valeurs):
     return sum(valeurs) / len(valeurs) if valeurs else None
 
 
+def date_fr(jour, aujourdhui):
+    annee = f" {jour.year}" if jour.year != aujourdhui.year else ""
+    return f"{'1er' if jour.day == 1 else jour.day} {MOIS[jour.month - 1]}{annee}"
+
+
 def fenetre(jours, aujourdhui, debut, fin):
     """Valeurs d'un {jour: valeur} entre aujourdhui - debut (inclus) et aujourdhui - fin (exclu)."""
     return [v for j, v in jours.items() if fin < (aujourdhui - j).days <= debut]
@@ -172,6 +187,11 @@ def lire_seances(v2):
                 s["courue"] = portion_courue(points)
         seances.append(s)
     return seances
+
+
+def fc_moyenne(seance):
+    secondes = sum(seance["fc"].values())
+    return sum(f * v for f, v in seance["fc"].items()) / secondes if secondes else None
 
 
 def zones(seance, fc_max):
@@ -274,7 +294,7 @@ def calculer(v2, sante, aujourdhui=None):
                             "monotonie": round(moyenne(sept) / ecart, 2) if ecart else None, "charge_7": round(sum(sept))},
                 "seances": [{"fichier": s["fichier"], "jour": s["jour"].isoformat(), "categorie": s["categorie"], "minutes": round(s["minutes"], 1),
                              "mouvement": s["mouvement"] and round(s["mouvement"], 1), "km": round(s["km"], 3), "gps": s["gps"], "montre": s["montre"],
-                             "fc": round(sum(f * v for f, v in s["fc"].items()) / sum(s["fc"].values())) if sum(s["fc"].values()) else None,
+                             "fc": (moyenne_fc := fc_moyenne(s)) and round(moyenne_fc),
                              "charge": round(s["charge"]), "zones": [round(z / 60, 1) for z in s["zones"]], "montee": s["montee"],
                              "cadence": s["cadence"] and round(s["cadence"]), "calories": s["calories"], "altitude": s["altitude"]} for s in seances],
                 "vo2_mois": [[j.isoformat(), round(median(v), 1)] for j, v in sorted(vo2_mois.items())],
@@ -284,71 +304,138 @@ def calculer(v2, sante, aujourdhui=None):
     return resultat
 
 
+def lecture_energie(batterie, stress, jours_course, sommeil_14, aujourdhui):
+    """Pourquoi l'énergie est basse quand elle l'est toujours : ce qui la fait bouger chez vous, pas une règle générale.
+    Une cause n'est citée que si les mesures la montrent ; énergie et stress viennent du même signal de la montre, donc
+    leur lien décrit, il ne prouve rien."""
+    veille = timedelta(days=1)
+    an = [(j, v) for j, v in batterie.items() if 0 <= (aujourdhui - j).days <= 365]
+    apres_course = moyenne(v for j, v in an if j - veille in jours_course)
+    autres_jours = moyenne(v for j, v in an if j - veille not in jours_course)
+    recents = [(stress[j - veille], v) for j, v in an if (aujourdhui - j).days <= 120 and j - veille in stress]
+    seuil = median(s for s, _ in recents) if recents else 0
+    calme, tendue = moyenne(v for s, v in recents if s < seuil), moyenne(v for s, v in recents if s >= seuil)
+    phrases = []
+    innocente = apres_course is not None and autres_jours is not None and apres_course >= autres_jours - ENERGIE_ECART / 2
+    if innocente:
+        phrases.append(f"Vos courses y changent peu : {apres_course:.0f} le lendemain d'une course, {autres_jours:.0f} les autres jours.")
+    if sommeil_14 and sommeil_14 >= 7:
+        phrases.append(f"Vous dormez assez : {virgule(sommeil_14)} h par nuit.")
+    if calme is not None and tendue is not None and calme - tendue >= ENERGIE_ECART:
+        phrases.append(f"Elle suit surtout le stress que mesure la montre : {calme:.0f} après une journée calme, {tendue:.0f} après une journée tendue.")
+    if innocente:
+        phrases.append("Inutile de réduire le sport pour ça.")
+    return " ".join(phrases)
+
+
 def bilan(seances, resultat, sante, aujourdhui, fc_repos_jours):
     """Les chiffres des 4 dernières semaines, et les conseils qu'ils appellent. Chaque conseil cite ses mesures : il doit
-    pouvoir être vérifié, et il ne s'affiche que si la mesure existe."""
+    pouvoir être vérifié, et il ne s'affiche que si la mesure existe. Ils partent de vos habitudes plutôt que d'un chiffre
+    général, et forment un tout : aucun n'ajoute d'effort quand un signal demande d'en retirer."""
     depuis = lambda s, jours, avant=0: avant <= (aujourdhui - s["jour"]).days < jours
     s28 = [s for s in seances if depuis(s, 28)]
-    courses = [s for s in s28 if s["categorie"] in COURSES]
-    courses_avant = [s for s in seances if s["categorie"] in COURSES and depuis(s, 56, 28)]
+    toutes_courses = [s for s in seances if s["categorie"] in COURSES]
+    courses = [s for s in toutes_courses if depuis(s, 28)]
+    courses_avant = [s for s in toutes_courses if depuis(s, 56, 28)]
     km, km_avant = sum(s["km"] for s in courses), sum(s["km"] for s in courses_avant)
+    km_habituel = sum(s["km"] for s in toutes_courses if depuis(s, 112, 28)) / 3  # par 4 semaines, sur les 3 mois d'avant
+    hausse = km > 1.3 * km_habituel and km - km_habituel >= HAUSSE_KM
     muscu = sum(s["categorie"] == "musculation" for s in s28)
     secondes = [sum(s["zones"][i] for s in courses) for i in range(len(ZONES))]
     total = sum(secondes)
     parts = [round(100 * v / total) for v in secondes] if total else None
+    dur = sum(parts[3:]) if parts else 0
     cardio = sum(s["cardio"] for s in s28)
     longue = max(courses, key=lambda s: s["minutes"], default=None)
-    derniere = max((s["jour"] for s in seances if s["categorie"] in COURSES), default=None)
+    derniere = max((s["jour"] for s in toutes_courses), default=None)
+    derniere_muscu = max((s["jour"] for s in seances if s["categorie"] == "musculation"), default=None)
     charge_7 = sum(s["charge"] for s in seances if depuis(s, 7))
     charge_3s = sum(s["charge"] for s in seances if depuis(s, 28, 7)) / 3
     actives = {s["jour"] - timedelta(days=s["jour"].weekday()) for s in seances if depuis(s, 84)}
+    # par tranches de 7 jours en remontant depuis aujourd'hui : un lundi ne casse pas une série du dimanche
+    tranches = {(aujourdhui - s["jour"]).days // 7 for s in toutes_courses}
+    semaines_courues = sum(n in tranches for n in range(4))
+    serie = next(n for n in count() if n not in tranches)
     jour = resultat["courbe"][-1] if resultat["courbe"] else None
     condition, fatigue, fraicheur = jour[1:] if jour else (None, None, None)
     sommeil = csv_jours(sante / "sommeil.csv", "total_h")
     batterie = csv_jours(sante / "garmin.csv", "batterie_max")
+    stress = csv_jours(sante / "garmin.csv", "stress_moy")
     rhr_7, rhr_60 = moyenne(fenetre(fc_repos_jours, aujourdhui, 7, -1)), moyenne(fenetre(fc_repos_jours, aujourdhui, 67, 7))
     sommeil_14 = moyenne(fenetre(sommeil, aujourdhui, 14, -1))
     batterie_14 = moyenne(fenetre(batterie, aujourdhui, 14, -1))
+    batterie_annee = fenetre(batterie, aujourdhui, 365, 14)
+    batterie_habituelle = median(batterie_annee) if len(batterie_annee) >= 60 else None
+    energie_basse = batterie_14 and batterie_habituelle and batterie_14 < ENERGIE_BASSE
     tendance = [s["metres_battement"] for s in seances if "metres_battement" in s and depuis(s, 90)]
     tendance_avant = [s["metres_battement"] for s in seances if "metres_battement" in s and depuis(s, 180, 90)]
     fc_facile = round(FC_FACILE * resultat["fc_max"])
+    fc_dur = round(FC_DUR * resultat["fc_max"])
     conseils = []
 
-    def conseil(niveau, titre, detail):
-        conseils.append({"niveau": niveau, "titre": titre, "detail": detail})
+    def conseil(niveau, titre, detail, ajoute=None):  # ajoute : « sortie » ou « effort », pour que programme.py puisse le retirer selon vos réponses
+        conseils.append({"niveau": niveau, "titre": titre, "detail": detail, "ajoute": ajoute})
 
-    if parts and sum(parts[3:]) >= 35 and len(courses) >= 2:
-        conseil("action", "Courez plus lentement la plupart du temps",
-                f"{sum(parts[3:])} % de votre temps de course des 4 dernières semaines est à haute intensité, et seulement {100 - sum(parts[3:])} % en dessous. "
-                f"Les coureurs qui progressent font environ 80 % de leur volume en facile : c'est lui qui développe l'endurance et permet de récupérer des séances dures. "
-                f"Essayez de rester sous {fc_facile} battements par minute sur deux sorties sur trois, quitte à marcher dans les côtes : c'est le pouls qui compte, pas l'allure.")
-    if fraicheur is not None and condition and fraicheur < -.3 * condition and fraicheur < -20:
+    repos_utile = fraicheur is not None and condition and fraicheur < -.3 * condition and fraicheur < -20
+    effort_en_hausse = charge_3s >= 30 and charge_7 > 1.5 * charge_3s
+    pouls_en_hausse = rhr_7 and rhr_60 and rhr_7 - rhr_60 >= 5
+    energie_en_baisse = energie_basse and batterie_14 < batterie_habituelle - ENERGIE_ECART
+    peut_ajouter = not (repos_utile or effort_en_hausse or pouls_en_hausse or energie_en_baisse)
+
+    if repos_utile:
         conseil("action", "Levez le pied quelques jours",
                 f"Votre effort récent ({fatigue:.0f}) dépasse nettement votre effort habituel ({condition:.0f}). Prévoyez 2 ou 3 jours légers avant la prochaine séance dure.")
-    elif charge_3s >= 30 and charge_7 > 1.5 * charge_3s:
+    elif effort_en_hausse:
         conseil("attention", "Votre effort monte vite",
                 f"Effort des 7 derniers jours : {charge_7:.0f} points, contre {charge_3s:.0f} par semaine en moyenne sur les 3 précédentes. Gardez une hausse progressive pour limiter le risque de blessure.")
     elif fraicheur is not None and condition and fraicheur > .25 * condition and fraicheur > 5:
-        conseil("bien", "Vous êtes reposé", "C'est un bon moment pour une séance plus dure, ou pour tester votre niveau sur 5 km.")
-    if len(courses) < 8:
-        conseil("action" if len(courses) < 4 else "attention", "Courez plus régulièrement",
-                f"{len(courses)} course{'s' if len(courses) > 1 else ''} en 4 semaines. La régularité compte plus que chaque séance : visez 3 sorties par semaine, même courtes.")
-    elif km_avant and km > 1.3 * km_avant:
-        conseil("attention", "Volume en forte hausse", f"{km:.0f} km sur 4 semaines contre {km_avant:.0f} km sur les 4 précédentes (+{100 * (km / km_avant - 1):.0f} %). Stabilisez une semaine avant d'augmenter encore.")
-    if longue and len(courses) >= 4 and longue["minutes"] < 60:
-        conseil("attention", "Ajoutez une sortie longue", f"Votre sortie la plus longue des 4 dernières semaines dure {longue['minutes']:.0f} min. Allongez-en une de 10 min par semaine, en facile, jusqu'à 60 à 75 min.")
-    if muscu < 4:
-        conseil("attention" if muscu else "action", "Renforcez-vous", f"{muscu} séance{'s' if muscu > 1 else ''} de musculation en 4 semaines. Deux séances courtes par semaine (jambes, tronc) soutiennent la course et limitent les blessures.")
-    else:
+        conseil("bien", "Vous êtes reposé", "C'est un bon moment pour sortir courir." if dur >= DUR_TROP
+                else "C'est un bon moment pour une séance plus dure, ou pour tester votre niveau sur 5 km.")
+    if peut_ajouter and semaines_courues < REGULIER:
+        constat = (f"Une course dans seulement {semaines_courues} des 4 dernières semaines." if semaines_courues
+                   else f"Aucune course depuis le {date_fr(derniere, aujourdhui)}." if derniere else "Aucune course en 4 semaines.")
+        conseil("action", "Courez plus régulièrement", f"{constat} La régularité compte plus que chaque séance : visez une sortie par semaine, même courte.", "effort")
+    elif peut_ajouter and len(courses) < 8:
+        tranquilles = [s for s in toutes_courses if depuis(s, 365) and s["km"] and s["minutes"] >= 15 and (fc := fc_moyenne(s)) and fc <= fc_facile]
+        modele = max(tranquilles, key=lambda s: s["jour"], default=None)
+        texte = f"{len(courses)} courses en 4 semaines, c'est régulier"
+        texte += f", mais elles sont dures : {dur} % du temps au-dessus de {fc_dur} battements par minute. " if dur >= DUR_TROP else ". "
+        texte += f"L'étape suivante est une sortie de plus, courte et tranquille : 20 à 30 min sous {fc_facile} battements, assez lent pour pouvoir parler"
+        texte += f", comme le {date_fr(modele['jour'], aujourdhui)} ({virgule(modele['km'])} km, {fc_moyenne(modele):.0f} battements en moyenne). " if modele else ". "
+        if hausse:
+            texte += f"Vos kilomètres ont déjà beaucoup monté ({km:.0f} km en 4 semaines, contre {km_habituel:.0f} km d'habitude) : n'allongez pas votre sortie longue pour l'instant."
+        conseil("action", f"Passez à {2 if len(courses) < 6 else 3} sorties par semaine", texte.strip(), "sortie")
+    elif hausse:
+        conseil("attention", "Volume en forte hausse", f"{km:.0f} km sur 4 semaines contre {km_habituel:.0f} km d'habitude. Stabilisez une semaine avant d'augmenter encore.")
+    if dur >= DUR_TROP and len(courses) >= 8:  # sur une ou deux sorties par semaine, ces 80 % n'ont pas de sens : voir ci-dessus
+        conseil("action", "Courez plus lentement la plupart du temps",
+                f"{dur} % de votre temps de course des 4 dernières semaines est dur (au-dessus de {fc_dur} battements par minute), et seulement {100 - dur} % en dessous. "
+                f"Quand on court plusieurs fois par semaine, les coureurs qui progressent font environ 80 % de leur volume en facile : c'est lui qui développe l'endurance et permet de récupérer des séances dures. "
+                f"Essayez de rester sous {fc_facile} battements par minute sur deux sorties sur trois, quitte à marcher dans les côtes : c'est le pouls qui compte, pas l'allure.")
+    if peut_ajouter and not hausse and longue and len(courses) >= 4 and longue["minutes"] < 60:
+        conseil("attention", "Ajoutez une sortie longue", f"Votre sortie la plus longue des 4 dernières semaines dure {longue['minutes']:.0f} min. Allongez-en une de 10 min par semaine, en facile, jusqu'à 60 à 75 min.", "effort")
+    if muscu >= 4:
         conseil("bien", "Musculation régulière", f"{muscu} séances en 4 semaines : continuez.")
-    if rhr_7 and rhr_60 and rhr_7 - rhr_60 >= 5:
+    elif peut_ajouter:
+        constat = (f"{muscu} séance{'s' if muscu > 1 else ''} en 4 semaines." if muscu
+                   else f"Dernière séance le {date_fr(derniere_muscu, aujourdhui)}." if derniere_muscu else "Aucune séance enregistrée.")
+        conseil("idee", "Pensez au renforcement", f"{constat} Deux séances courtes par semaine (jambes, tronc) soutiennent la course et limitent les blessures.", "effort")
+    if pouls_en_hausse:
         conseil("attention", "Pouls au repos en hausse", f"{rhr_7:.0f} bpm sur 7 jours contre {rhr_60:.0f} habituellement. Cela signale souvent de la fatigue, du stress ou un début de maladie : allégez. Si cela dure ou s'accompagne de symptômes, parlez-en à un médecin.")
     if sommeil_14 and sommeil_14 < 7:
         conseil("attention", "Dormez davantage", f"{virgule(sommeil_14)} h par nuit sur 14 jours. Viser 7 à 9 h est l'un des meilleurs leviers de récupération.")
-    elif sommeil_14:
-        conseil("bien", "Bon sommeil", f"{virgule(sommeil_14)} h par nuit sur 14 jours.")
-    if batterie_14 and batterie_14 < 50:
-        conseil("attention", "Récupération incomplète", f"Votre énergie plafonne en moyenne à {batterie_14:.0f} sur 100 depuis 14 jours : vous ne repartez pas chargé. Regardez d'abord le sommeil et le stress avant d'ajouter de la charge.")
+    elif sommeil_14 and not energie_basse:  # sinon la lecture de l'énergie le cite déjà
+        conseil("bien", "Assez de sommeil", f"{virgule(sommeil_14)} h par nuit sur 14 jours.")
+    if energie_en_baisse:
+        conseil("attention", "Énergie plus basse que d'habitude",
+                f"La note d'énergie de votre montre monte à {batterie_14:.0f} sur 100 au mieux de la journée depuis 14 jours, contre {batterie_habituelle:.0f} d'habitude. Gardez vos sorties tranquilles tant qu'elle n'est pas remontée.")
+    elif energie_basse:
+        conseil("attention", "Énergie basse, mais rien de nouveau",
+                f"La note d'énergie de votre montre monte à {batterie_14:.0f} sur 100 au mieux de la journée, votre niveau habituel depuis un an ({batterie_habituelle:.0f}). "
+                + lecture_energie(batterie, stress, {s["jour"] for s in toutes_courses}, sommeil_14, aujourdhui))
+    if serie >= 4:
+        record = km and km >= max(sum(s["km"] for s in toutes_courses if 0 <= (aujourdhui - timedelta(days=n) - s["jour"]).days < 28) for n in range(1, 730))
+        conseil("bien", "Belle régularité", f"{serie} semaines de suite avec une course" + (f", et {km:.0f} km : vos 4 meilleures semaines depuis au moins 2 ans." if record else "."))
     if len(tendance) >= 4 and len(tendance_avant) >= 4:
         evolution = 100 * (moyenne(tendance) / moyenne(tendance_avant) - 1)
         if evolution >= 2:
@@ -361,12 +448,12 @@ def bilan(seances, resultat, sante, aujourdhui, fc_repos_jours):
             conseil("bien", "Votre capacité cardio progresse", f"{virgule(vo2['valeur'])} contre {virgule(vo2['avant'])} les 3 mois précédents.")
         elif vo2["avant"] - vo2["valeur"] >= VO2_ECART:
             conseil("attention", "Votre capacité cardio recule", f"{virgule(vo2['valeur'])} contre {virgule(vo2['avant'])} les 3 mois précédents. La fatigue ou la chaleur peuvent jouer : regardez la tendance sur plusieurs semaines.")
-    conseils.sort(key=lambda c: ("action", "attention", "bien").index(c["niveau"]))
+    conseils.sort(key=lambda c: ("action", "attention", "idee", "bien").index(c["niveau"]))
     return {"forme": {"condition": condition, "fatigue": fatigue, "fraicheur": fraicheur},
             "periode": {"seances": len(s28), "courses": len(courses), "km": round(km, 1), "km_avant": round(km_avant, 1), "minutes": round(sum(s["minutes"] for s in s28)),
                         "musculation": muscu, "semaines_actives": len(actives), "derniere_course": derniere and derniere.isoformat(),
                         "avec_cardio": cardio, "charge_7": round(charge_7), "sortie_longue": longue and round(longue["minutes"])},
-            "zones": parts, "conseils": conseils}
+            "zones": parts, "conseils": conseils, "peut_ajouter": peut_ajouter}
 
 
 def ecrire(v2, sante):

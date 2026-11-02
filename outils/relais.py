@@ -4,6 +4,7 @@
   relais.py preparer     conversion précise de toutes les sources (sources-brutes/, ZIP compris) : une activité
                          par sortie réelle, en FIT, rangée par catégorie dans activites-v2/ (+ contrôle)
   relais.py sante        pas, poids et sommeil de toutes les sources → sante/ (et les pesées → Garmin)
+  relais.py coach        la note du coach → sante/coach.json, rédigée sur l'ordinateur par le conteneur relais-ia
   relais.py envoyer <garmin|strava|intervals|runalyze|smashrun> [N] [--reessayer]
                          envoie tout ce qui reste de activites-v2/ (ou N activités), de la plus ancienne à la plus
                          récente, au rythme permis par le service
@@ -16,7 +17,7 @@
                          prépare des parcours à suivre sur la montre (itinéraire AllTrails, activité à refaire…)
   relais.py vers-montre garmin [nom ou numéro…]
                          parcours et entraînements de Garmin Connect pour la montre (sans nom : la liste)
-  relais.py garmin       récupère chez Garmin les nouvelles activités de la montre, puis refait la bibliothèque
+  relais.py garmin       ce que la montre a envoyé à Garmin : nouvelles activités, pas, sommeil, détail des journées
   relais.py collecte [AAAA-MM-JJ [AAAA-MM-JJ]]  le code de garmin-grafana (garmin_grafana/), base locale : les 3 derniers jours, ou la période
   relais.py mot-de-passe [--retirer]  choisit le mot de passe de l'interface, par exemple après un oubli
   relais.py certificat <adresse de l'ordinateur> [--refaire]  chiffre l'accès depuis le réseau de la maison
@@ -85,6 +86,17 @@ GARMIN_CONNECT = chemin(CHEMINS.get("garmin_connect", "garmin-connect"))  # copi
 GARMIN_DEPUIS = 2008  # première année demandée à Garmin Connect (ouverture du service)
 PAUSE_GARMIN = 1  # secondes entre deux demandes à Garmin Connect, au rythme d'un client ordinaire
 MINUTE_RECUL, MINUTE_RELUS, MINUTE_VIDES = 200, 3, 7  # détail à la minute : jours en arrière au plus, jours relus, jours vides pour s'arrêter
+GARMIN_ETAT = PROJET / "outils" / ".garmin-etat.json"  # dernier envoi de la montre déjà copié, et l'heure de la copie
+# Réglages de la montre que l'interface peut changer, avec leurs valeurs permises (None : oui ou non). Le compte Garmin
+# les garde, la montre les reçoit à sa synchronisation suivante. « groupe.champ » désigne un champ d'un objet du compte.
+REGLAGES_MONTRE = {
+    "audioPromptLapEnabled": None, "audioPromptSpeedPaceEnabled": None, "audioPromptHeartRateEnabled": None,
+    "audioPromptDialectType": ("FR_FR", "EN_US"),  # les deux seules valeurs essayées sur le compte
+    "autoSyncMinutesBeforeSync": (60, 120, 240), "autoSyncStepsBeforeSync": (1000, 2000),
+    "activityTracking.highHrAlertEnabled": None, "activityTracking.highHrAlertThreshold": tuple(range(100, 151, 10)),
+    "activityTracking.lowHrAlertEnabled": None, "activityTracking.lowHrAlertThreshold": (35, 40, 45, 50),
+    "activityTracking.moveAlertEnabled": None, "alertTonesEnabled": None, "keyTonesEnabled": None,
+}
 AUTO_GARMIN = 300  # activités envoyées par destination et par passage automatique (SPORT_AUTO_NOMBRE dans sport.env)
 
 # Toutes les sources lues par « inventaire » et « historique » : « donnees » et « sources » de chemins.yml.
@@ -803,11 +815,12 @@ def copier_garmin(api):
     def journees(nom, lire):
         """Garmin ne garde le détail des journées que quelques mois (11/07/2026 présent, 01/06 absent le 01/11) : chaque
         journée terminée est copiée pour de bon. Du plus récent au plus ancien, jusqu'à MINUTE_VIDES jours vides de suite ;
-        les MINUTE_RELUS derniers jours sont relus, car la montre a pu synchroniser depuis."""
+        les MINUTE_RELUS derniers jours sont relus, car la montre a pu synchroniser depuis. Le jour même est copié aussi,
+        jusqu'à la dernière synchronisation de la montre, et refait à chaque passage."""
         dossier = GARMIN_CONNECT / "minute"
         dossier.mkdir(exist_ok=True)
         copies = vides = 0
-        for recul in range(1, MINUTE_RECUL + 1):
+        for recul in range(MINUTE_RECUL + 1):
             jour = (aujourdhui - timedelta(days=recul)).isoformat()
             fichier = dossier / f"garmin-connect-{nom}-{jour}.json"
             if fichier.exists() and recul > MINUTE_RELUS:
@@ -967,6 +980,59 @@ def cmd_collecte():
     collecte_garmin_grafana(connexion_garmin(), debut, args[1] if len(args) > 1 else date.today().isoformat())
 
 
+def envoi_montre(api):
+    """L'heure (en ms) du dernier envoi de la montre à Garmin : une seule demande, pour savoir s'il y a du neuf à copier."""
+    try:
+        return (api.get_device_last_used() or {}).get("lastUsedDeviceUploadTime")
+    except Exception:  # Garmin injoignable : la copie se fait quand même, et le coup d'œil suivant la refera
+        return None
+
+
+def etat_garmin():
+    return json.loads(GARMIN_ETAT.read_text()) if GARMIN_ETAT.exists() else {}
+
+
+def noter_copie(envoi):
+    GARMIN_ETAT.write_text(json.dumps({"envoi_montre": envoi, "copie": datetime.now().isoformat(timespec="minutes")}))
+
+
+def montre_compte(api):
+    """(identifiant, nom) de la montre utilisée en dernier sur le compte Garmin."""
+    dernier = api.get_device_last_used() or {}
+    return dernier.get("userDeviceId"), dernier.get("lastUsedDeviceName")
+
+
+def lire_reglages_montre(api):
+    """Les réglages de REGLAGES_MONTRE tels que le compte Garmin les garde."""
+    ident, nom = montre_compte(api)
+    reglages = api.get_device_settings(ident)
+    valeur = lambda cle: (reglages.get(cle.rpartition(".")[0]) or {}).get(cle.rpartition(".")[2]) if "." in cle else reglages.get(cle)
+    return {"montre": nom, "reglages": {cle: valeur(cle) for cle in REGLAGES_MONTRE}}
+
+
+def changer_reglages_montre(api, changements):
+    """Envoie à Garmin les seuls réglages demandés, une fois vérifiés, puis relit le compte : la réponse dit ce que Garmin
+    garde vraiment. Un champ d'un objet part avec son objet entier, relu juste avant : un objet partiel pourrait en vider
+    les autres champs. Rien d'autre n'est touché."""
+    ident, _ = montre_compte(api)
+    actuels, envoi = api.get_device_settings(ident), {}
+    for cle, valeur in changements.items():
+        if cle not in REGLAGES_MONTRE:
+            raise ValueError(f"réglage non modifiable : {cle}")
+        permises = REGLAGES_MONTRE[cle]
+        refusee = not isinstance(valeur, bool) if permises is None else isinstance(valeur, bool) or valeur not in permises
+        if refusee:
+            raise ValueError(f"valeur refusée pour {cle} : {valeur}")
+        groupe, _, champ = cle.rpartition(".")
+        if groupe:
+            envoi.setdefault(groupe, dict(actuels.get(groupe) or {}))[champ] = valeur
+        else:
+            envoi[cle] = valeur
+    if envoi:
+        api.update_device_settings(ident, envoi)
+    return lire_reglages_montre(api)
+
+
 def copier_compte_garmin(api):
     """Le reste du compte, en lecture seule, dans garmin-connect/compte.json : appareils, records, badges, matériel, objectifs,
     défis, plans, entraînements et parcours. Ni le nom ni l'adresse du profil : ils ne servent à rien ici. Une rubrique que Garmin
@@ -1044,11 +1110,17 @@ def cmd_certificat():
 
 
 def cmd_garmin():
-    """Récupère les nouvelles activités de la montre chez Garmin et, s'il y en a, refait la bibliothèque."""
+    """Ce que la montre a envoyé à Garmin : les nouvelles activités (puis la bibliothèque, s'il y en a), les pas, le
+    sommeil et le détail des derniers jours. Rien ne part vers Garmin, pas même les pesées : c'est le rôle de « sante »."""
     utiliser_venv()
-    if copier_activites_garmin(connexion_garmin()):
+    api = connexion_garmin()
+    envoi = envoi_montre(api)  # avant la copie : un envoi pendant celle-ci sera vu au coup d'œil suivant
+    if copier_activites_garmin(api):
         cmd_preparer()
-        ecrire_performance()
+    copier_garmin(api)
+    ecrire_csv_sante()
+    ecrire_performance()
+    noter_copie(envoi)
 
 
 def copier_smashrun():
@@ -1092,20 +1164,14 @@ def ecrire_performance():
         print(f"Performance : non calculée ({e})")
 
 
-def faire_sante(api_garmin=None):
+def ecrire_csv_sante():
+    """Les pas, le poids et le sommeil de toutes les sources, dédoublonnés dans les CSV de sante/ : renvoie les pesées."""
     import sante
 
     print("Lecture des pas, du poids et du sommeil de toutes les sources…")
     racines = list(sources().values())
     if not any(ARCHIVE.resolve().is_relative_to(r.resolve()) for r in racines):
         racines.append(ARCHIVE)  # sauvegarde de la montre rangée hors des sources (chemins.yml)
-    if api_garmin is not None:
-        copier_garmin(api_garmin)
-        copier_compte_garmin(api_garmin)
-        try:
-            collecte_garmin_grafana(api_garmin, (date.today() - timedelta(days=3)).isoformat(), date.today().isoformat())
-        except Exception as e:  # la santé et les pesées ne doivent pas en dépendre
-            print(f"garmin-grafana : collecte interrompue ({e})")
     racines.append(GARMIN_CONNECT)  # exclu des autres racines : lu ici seulement
     pas, poids, sommeil, montre, lus = sante.collecter(racines, EXCLUS_PROJET | {"convertis", SANTE.name})
     print(f"  {lus['pas']} valeurs de pas, {lus['poids']} pesées, {lus['sommeil']} nuits lues ; {lus['écartés']} vides ou aberrantes écartées")
@@ -1114,11 +1180,41 @@ def faire_sante(api_garmin=None):
     sante.ecrire_csv(SANTE, pas, poids, sommeil, montre)
     sante.ecrire_journees_garmin(GARMIN_CONNECT, SANTE)
     print(f"  détail : {SANTE}/pas.csv, poids.csv, sommeil.csv, montre.csv, garmin.csv")
+    return poids
+
+
+def faire_sante(api_garmin=None):
+    if api_garmin is not None:
+        envoi = envoi_montre(api_garmin)
+        copier_garmin(api_garmin)
+        copier_compte_garmin(api_garmin)
+        try:
+            collecte_garmin_grafana(api_garmin, (date.today() - timedelta(days=3)).isoformat(), date.today().isoformat())
+        except Exception as e:  # la santé et les pesées ne doivent pas en dépendre
+            print(f"garmin-grafana : collecte interrompue ({e})")
+    poids = ecrire_csv_sante()
+    if api_garmin is not None:
+        noter_copie(envoi)
     copier_sommeil()
     copier_smashrun()
     ecrire_performance()
     if api_garmin is not None:
         poids_garmin(api_garmin, poids)
+
+
+def ecrire_coach():
+    import coach
+
+    fichier = SANTE / "performance.json"
+    if not fichier.exists():
+        print("Coach : pas encore de statistiques (relais.py sante)")
+        return
+    coach.ecrire(json.loads(fichier.read_text()), V2, SANTE, GARMIN_CONNECT)
+
+
+def cmd_coach():
+    utiliser_venv()
+    ecrire_coach()
 
 
 def cmd_sante():
@@ -1164,6 +1260,9 @@ def cmd_auto():
 
     etape("Pas, poids et sommeil")
     faire_sante(api)
+
+    etape("Mot du coach")
+    ecrire_coach()
 
     choisies = [d.strip() for d in conf.get("SPORT_AUTO_DESTINATIONS", "").split(",") if d.strip() in DESTINATIONS]
     for nom in choisies:
@@ -1375,6 +1474,7 @@ def main():
         "satellites": cmd_satellites,
         "envoyer": cmd_envoyer,
         "sante": cmd_sante,
+        "coach": cmd_coach,
         "auto": cmd_auto,
         "garmin": cmd_garmin,
         "collecte": cmd_collecte,

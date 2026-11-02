@@ -26,3 +26,17 @@ services:
       - "${RELAIS_ECOUTE:-127.0.0.1}:8090:8090"  # 0.0.0.0 dans .env : aussi pour les appareils du réseau de la maison
       - "${RELAIS_ECOUTE:-127.0.0.1}:8091:8091"  # https, après relais.py certificat
     restart: unless-stopped
+
+  # petit modèle de langue du coach (voir outils/coach.py) : aucun port ouvert, seul le conteneur relais lui parle
+  relais-ia:
+    container_name: relais-ia
+    image: ollama/ollama:0.40.13
+    environment:
+      - OLLAMA_KEEP_ALIVE=0  # libère la mémoire dès la note écrite
+      - TZ=Europe/Paris
+    volumes:
+      - relais-ia:/root/.ollama  # dans Docker : le SSD en exFAT ne convient pas aux modèles
+    restart: unless-stopped
+
+volumes:
+  relais-ia:
